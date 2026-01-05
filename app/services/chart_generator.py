@@ -144,7 +144,21 @@ Extract up to 10 data points maximum."""
             temperature=0.3
         )
         
-        return result.get('dataPoints', [])
+        data_points = result.get('dataPoints', [])
+        
+        # Sanitize output: ensure everything is a dict with label/value
+        sanitized = []
+        if isinstance(data_points, list):
+            for dp in data_points:
+                if isinstance(dp, dict):
+                    sanitized.append({
+                        'label': str(dp.get('label', 'Item')),
+                        'value': dp.get('value', 0)
+                    })
+                else:
+                    sanitized.append({'label': str(dp), 'value': 0})
+        
+        return sanitized
     
     except Exception:
         return []
@@ -157,8 +171,29 @@ def _build_chart_config(
 ) -> Dict[str, Any]:
     """Build Chart.js configuration object"""
     
-    labels = [dp['label'] for dp in data_points]
-    values = [dp['value'] for dp in data_points]
+    # Safe data point extraction with type checking
+    labels = []
+    values = []
+    
+    for dp in data_points:
+        if isinstance(dp, dict):
+            label = str(dp.get('label', 'Unknown'))
+            try:
+                value = float(dp.get('value', 0))
+            except (ValueError, TypeError):
+                value = 0.0
+        else:
+            # Fallback if AI returned strings instead of dicts
+            label = str(dp)
+            value = 0.0
+            
+        labels.append(label)
+        values.append(value)
+    
+    # Ensure we have at least some data
+    if not labels:
+        labels = ["No Data"]
+        values = [0]
     
     # Color schemes for different chart types
     colors = [

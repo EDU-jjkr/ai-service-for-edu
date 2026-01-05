@@ -6,7 +6,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import os
 
-from app.routers import deck, activity, lesson_plan, doubt_solver, textbook
+from app.routers import deck, activity, lesson_plan, doubt_solver, textbook, topic
 
 app = FastAPI(
     title="Educational Platform AI Service",
@@ -29,6 +29,7 @@ app.include_router(activity.router, prefix="/api", tags=["Activity Generation"])
 app.include_router(lesson_plan.router, prefix="/api", tags=["Lesson Plans"])
 app.include_router(doubt_solver.router, prefix="/api", tags=["Doubt Solver"])
 app.include_router(textbook.router, prefix="/api", tags=["Textbook Index"])
+app.include_router(topic.router, prefix="/api", tags=["Topic Generation"])
 
 @app.get("/")
 async def root():

@@ -123,8 +123,16 @@ Content: {content}
 Subject: {subject}
 
 VISUALIZATION TYPES:
-1. diagram - For processes, cycles, flows, timelines, relationships, mind maps
-   Examples: water cycle, food chain, historical timeline, concept map
+1. diagram - For processes, cycles, flows, timelines, relationships, mind maps, class diagrams, state diagrams
+   Diagram subtypes:
+   - flowchart: Sequential processes, decision trees, algorithms
+   - mindmap: Concept relationships, brainstorming, hierarchies
+   - timeline: Historical events, project schedules, chronological sequences
+   - sequence: Interactions between entities, API calls, user flows
+   - class: Object relationships, database schemas, system architecture
+   - state: State machines, lifecycle diagrams, status workflows
+   - pie: Simple proportions (can also use chart type)
+   Examples: water cycle, food chain, historical timeline, concept map, system architecture
    
 2. chart - For numerical data, statistics, comparisons, trends
    Examples: population growth, temperature changes, survey results
@@ -140,6 +148,8 @@ VISUALIZATION TYPES:
 
 IMPORTANT RULES:
 - Prefer FREE tools (diagram, chart, math) over paid (illustration)
+- For diagrams, ALWAYS specify the diagramType in metadata
+- Use mindmap for concept relationships, timeline for chronological events, sequence for interactions
 - Only suggest 'illustration' if absolutely necessary for understanding
 - Consider the subject and grade level
 - Confidence should reflect how beneficial the visual would be (0-100)
@@ -151,7 +161,7 @@ Return JSON format:
     "reasoning": "Brief explanation of why this type is best",
     "metadata": {{
         // Type-specific configuration
-        // For diagram: {{"diagramType": "flowchart|mindmap|timeline"}}
+        // For diagram: {{"diagramType": "flowchart|mindmap|timeline|sequence|class|state|pie"}}
         // For chart: {{"chartType": "bar|line|pie", "dataPoints": [...]}}
         // For math: {{"equations": ["E=mc^2"]}}
         // For illustration: {{"description": "what to illustrate"}}
@@ -183,6 +193,24 @@ Analyze now:"""
             if result['visualType'] not in valid_types:
                 result['visualType'] = 'none'
                 result['confidence'] = 30
+            
+            # Ensure metadata matches expected structure for visuals
+            if result['visualType'] == 'chart' and 'dataPoints' in result['metadata']:
+                dps = result['metadata']['dataPoints']
+                if not isinstance(dps, list):
+                    result['metadata']['dataPoints'] = []
+                else:
+                    # Basic sanitization
+                    sanitized = []
+                    for dp in dps:
+                        if isinstance(dp, dict):
+                            sanitized.append({
+                                'label': str(dp.get('label', 'Label')),
+                                'value': dp.get('value', 0)
+                            })
+                        else:
+                            sanitized.append({'label': str(dp), 'value': 0})
+                    result['metadata']['dataPoints'] = sanitized
             
             return result
             

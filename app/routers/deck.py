@@ -48,21 +48,52 @@ async def modify_deck(request: DeckModifyRequest):
             temperature=0.7
         )
         
-        # We need to re-process visuals IF the content changed significantly, 
-        # but for simplicity/speed in this iteration, we will just return the text changes 
-        # and let the frontend/backend handle visual re-generation if needed later.
-        # However, to match response_model, we need to ensure structure is correct.
+        # Regenerate visuals for the modified deck
+        logger.info(f"Regenerating visuals for modified deck with {len(result.get('slides', []))} slides")
+        
+        # Prepare slides for visual routing
+        slides_for_routing = [
+            {"title": slide["title"], "content": slide["content"]}
+            for slide in result.get("slides", [])
+        ]
+        
+        # Get visual routing results
+        visual_routes = await batch_route_slides(
+            slides=slides_for_routing,
+            subject=request.subject,
+            enable_paid_services=False
+        )
 
-        # Re-construct slides
+        # Generate actual visuals
+        visual_results = await batch_generate_visuals(
+            slides=slides_for_routing,
+            visual_routes=visual_routes,
+            subject=request.subject
+        )
+
+        # Combine text content + visual metadata
         updated_slides = []
-        for s in result.get("slides", []):
-             # basic validation/reconstruction to match schema
-             updated_slides.append(Slide(
-                 title=s.get("title", "Untitled"),
-                 content=s.get("content", ""),
-                 order=s.get("order", 0),
-                 visualMetadata=None # Reset visuals on modify for now to be safe, or we could try to preserve
-             ))
+        for slide_data, visual_route, visual_result in zip(result.get("slides", []), visual_routes, visual_results):
+            # Create visual metadata if visual was generated
+            visual_metadata = None
+            if visual_route.get('visualType') and visual_result.get('success'):
+                visual_config = visual_route.get('visualConfig', {})
+                visual_config['generatedData'] = visual_result.get('data', {})
+                
+                visual_metadata = VisualMetadata(
+                    visualType=visual_route['visualType'],
+                    visualConfig=visual_config,
+                    confidence=visual_route.get('confidence'),
+                    generatedBy=visual_route.get('generatedBy'),
+                    reasoning=visual_route.get('reasoning')
+                )
+            
+            updated_slides.append(Slide(
+                title=slide_data.get("title", "Untitled"),
+                content=slide_data.get("content", ""),
+                order=slide_data.get("order", 0),
+                visualMetadata=visual_metadata
+            ))
 
         return DeckGenerateResponse(
             title=result.get("title", request.currentDeck.get("title")),
@@ -76,147 +107,162 @@ async def modify_deck(request: DeckModifyRequest):
 
 @router.post("/generate-deck", response_model=DeckGenerateResponse)
 async def generate_deck(request: DeckGenerateRequest):
-    """Generate a teaching deck using AI with smart visual routing and generation"""
+    """Generate a teaching deck using AI with structured topic sequence"""
     try:
-        # Enhanced system message with instructional design expertise
-        system_message = """You are an elite instructional designer and master teacher with expertise in creating compelling educational presentations. You understand learning science, cognitive load theory, and how to structure information for maximum retention.
-
-Your presentations are known for:
-- Clear narrative flow that builds understanding step-by-step
-- Perfect balance between content depth and visual clarity
-- Age-appropriate language and examples that resonate with students
-- Engaging hooks and memorable takeaways
-- Strategic use of questions, examples, and applications
-- Content formatted for visual presentation (not essays)
-
-You create slide content that teachers can directly use with minimal editing. Each slide is focused, visually presentable, and designed to facilitate discussion rather than being read verbatim.
-
-Always respond with valid, well-structured JSON."""
-
-        # Calculate recommended slide allocation
-        intro_slides = 1
-        conclusion_slides = 1
-        content_slides = request.numSlides - 2
+        # Get topics list - support both new format (topics array) and legacy (single topic)
+        topics_list = request.topics if request.topics else [request.topic] if request.topic else []
         
-        prompt = f"""Design a comprehensive teaching presentation deck with exceptional pedagogical structure.
+        if not topics_list:
+            raise HTTPException(status_code=400, detail="No topics provided")
+        
+        # Use structured format if requested or if we have multiple topics
+        use_structured = request.structuredFormat or len(topics_list) > 0
+        
+        if use_structured:
+            # NEW STRUCTURED FORMAT: 5 slides per topic + 1 summary
+            system_message = """You are an expert educational content designer specializing in creating structured teaching decks.
+            
+Your decks follow a precise pedagogical structure for each topic:
+1. Definition - Clear, concise definition of the concept
+2. Details & Explanation - In-depth explanation with examples
+3. Basic Question - Simple question to check understanding
+4. Numerical/Hard Question - Challenging problem requiring application
+5. Olympiad Question - Extremely difficult, competition-level problem
 
-PRESENTATION SPECIFICATIONS:
-- Topic: "{request.topic}"
+You create content that is:
+- Age-appropriate for the specified grade level
+- Accurate and aligned with curriculum standards
+- Engaging and thought-provoking
+- Properly formatted for presentation
+
+Always respond with valid JSON."""
+
+            topics_str = ", ".join(topics_list)
+            num_topics = len(topics_list)
+            total_slides = num_topics * 5 + 1  # 5 per topic + 1 summary
+            
+            prompt = f"""Generate a structured teaching deck for the following:
+
+SPECIFICATIONS:
 - Subject: {request.subject}
 - Grade Level: {request.gradeLevel}
-- Total Slides: {request.numSlides} (including intro and conclusion)
+- Chapter: {request.chapter or 'General'}
+- Topics: {topics_str}
+- Number of Topics: {num_topics}
+- Total Slides Required: {total_slides}
 
-INSTRUCTIONAL DESIGN FRAMEWORK:
+STRICT STRUCTURE (follow this EXACTLY for EACH topic):
 
-1. NARRATIVE STRUCTURE:
-   - Slide 1: Hook + Learning Objectives (What will students discover?)
-   - Slides 2-{content_slides + 1}: Core content with logical progression
-   - Slide {request.numSlides}: Summary + Call-to-Action/Reflection
+For each topic, create exactly 5 slides in this order:
 
-2. COGNITIVE LOAD PRINCIPLES:
-   - Each slide should focus on ONE main idea
-   - Use 3-5 concise bullet points OR 2-3 short paragraphs per slide
-   - Break complex concepts across multiple slides rather than cramming
-   - Include transition phrases between concepts
+**Slide Type 1: DEFINITION**
+- Title: "[Topic Name]: Definition"
+- Content: Clear, textbook-quality definition. Include key terms in bold.
+- Keep it concise: 2-3 sentences maximum.
 
-3. CONTENT REQUIREMENTS PER SLIDE:
+**Slide Type 2: DETAILS & EXPLANATION**  
+- Title: "Understanding [Topic Name]"
+- Content: Detailed explanation with:
+  • Key concepts and principles
+  • Real-world examples
+  • Important formulas (if applicable)
+  • Visual descriptions [mention what diagrams would help]
+- Use bullet points, 4-6 points.
 
-   **Introduction Slide (Slide 1):**
-   - Compelling hook/question that sparks curiosity
-   - 2-4 clear learning objectives starting with action verbs
-   - Optional: Relevant real-world connection
+**Slide Type 3: BASIC QUESTION (Easy)**
+- Title: "[Topic Name]: Practice Question 1"
+- Content: Simple question testing basic understanding.
+  • State the question clearly
+  • For MCQ, provide 4 options (A, B, C, D)
+  • Include "Answer: [correct answer]" at the end
+  • Brief explanation of why that's correct
 
-   **Content Slides (Slides 2-{content_slides + 1}):**
-   - Clear, specific title (not generic like "Main Concept")
-   - 3-5 bullet points OR 2-3 short paragraphs
-   - Each point should be presentation-ready (concise, not full sentences unless needed)
-   - Include at least 2 slides with concrete examples or applications
-   - Include at least 1 slide with a thought-provoking question or discussion prompt
-   - Use analogies, metaphors, or real-world connections for abstract concepts
-   - Progressive complexity: start simple, build to more sophisticated ideas
+📊 EASY DIFFICULTY BOUNDARIES:
+- Solution steps: 1-3 steps MAXIMUM
+- Completion time: Under 5 minutes
+- Prior knowledge: None needed - question is self-contained
+- Cognitive load: Single basic concept only
 
-   **Conclusion Slide (Slide {request.numSlides}):**
-   - 3-4 key takeaways (what students should remember)
-   - Connection to bigger picture or real-world application
-   - Reflection question or next steps
+**Slide Type 4: NUMERICAL/HARD QUESTION (Medium)**
+- Title: "[Topic Name]: Practice Question 2 (Challenging)"
+- Content: Numerical problem or complex application question.
+  • Multi-step problem requiring understanding
+  • Show the problem setup clearly
+  • Include "Solution:" with step-by-step working
+  • Include "Answer: [final answer]"
 
-4. AGE-APPROPRIATE ADAPTATION FOR {request.gradeLevel}:
-   - Vocabulary and sentence complexity suitable for this grade
-   - Examples and references relevant to students' lives and interests
-   - Appropriate cognitive expectations (concrete vs. abstract thinking)
-   - Engagement strategies matching attention span and maturity
+📊 MEDIUM DIFFICULTY BOUNDARIES:
+- Solution steps: 4-7 steps required
+- Completion time: 10-20 minutes
+- Prior knowledge: Assumes familiarity with basic domain concepts
+- Cognitive load: Combines 2-3 related concepts
 
-5. SUBJECT-SPECIFIC CONSIDERATIONS FOR {request.subject}:
-   - Use discipline-appropriate terminology and frameworks
-   - Include relevant examples from the field
-   - Consider what visuals or diagrams might accompany content (mention in brackets if helpful)
+**Slide Type 5: OLYMPIAD QUESTION (Very Difficult/Hard)**
+- Title: "[Topic Name]: Challenge Question (Olympiad Level)"
+- Content: Extremely challenging problem.
+  • Competition-style question (JEE/NEET/Olympiad level)
+  • May combine multiple concepts across topics
+  • Include "Approach:" with hints
+  • Include "Solution:" with detailed working
+  • Include "Answer: [final answer]"
 
-6. ENGAGEMENT ELEMENTS (distribute across deck):
-   - At least 1 thought-provoking question slide
-   - At least 1 real-world application or example
-   - At least 1 opportunity for student reflection or prediction
-   - Use "you" language to directly address students
+📊 HARD DIFFICULTY BOUNDARIES:
+- Solution steps: 8+ steps required
+- Completion time: 30+ minutes
+- Prior knowledge: Deep understanding required, synthesize multiple advanced concepts
+- Cognitive load: Creative problem-solving, novel approaches needed
+- Target: Only top 5% students should solve independently
 
-OUTPUT FORMAT (return as JSON):
+**FINAL SLIDE: SUMMARY**
+After all topics are covered, create ONE summary slide:
+- Title: "Today's Learning Summary"
+- Content: Bullet points covering:
+  • Each topic we covered
+  • Key formulas/concepts to remember
+  • 2-3 key takeaways
+- No new content, just consolidation.
+
+TOPICS TO COVER (in order):
+{chr(10).join([f"{i+1}. {topic}" for i, topic in enumerate(topics_list)])}
+
+OUTPUT FORMAT:
 {{
-    "title": "Engaging, specific presentation title (not just the topic)",
+    "title": "{request.chapter or topics_list[0]}: Complete Teaching Deck",
     "slides": [
-        {{
-            "title": "Specific, Clear Slide Title",
-            "content": "• Bullet point 1: Concise, presentation-ready text
-• Bullet point 2: Use formatting like bold **terms** or [Visual: diagram suggestion]
-• Bullet point 3: Each point is digestible and focused
-• Bullet point 4: Include examples, not just definitions
-• Optional 5th point if needed
-
-OR for conceptual slides:
-
-Opening paragraph that introduces the concept clearly.
-
-Second paragraph that provides example or elaboration. Keep paragraphs short (2-4 sentences max).
-
-[Optional note about visuals, activities, or discussion prompts]",
-            "order": 1
-        }},
-        {{
-            "title": "Next Slide Title",
-            "content": "Content for slide 2...",
-            "order": 2
-        }}
+        {{"title": "Slide title", "content": "Slide content...", "order": 1}},
+        {{"title": "Slide 2 title", "content": "Content...", "order": 2}},
+        // ... continue for all {total_slides} slides
     ]
 }}
 
-CRITICAL QUALITY STANDARDS:
-- Each slide must be teachable in 2-4 minutes of class time
-- Content should prompt discussion, not just be read aloud
-- Use specific examples, not abstract generalities
-- Maintain consistent depth appropriate to {request.gradeLevel}
-- Ensure logical flow where each slide builds on previous ones
-- Avoid information overload - less is more
-- Write for slides, not for reading (visual-friendly format)
-- Include exactly {request.numSlides} slides, properly numbered 1-{request.numSlides}
+IMPORTANT:
+- Generate EXACTLY {total_slides} slides ({num_topics} topics × 5 slides + 1 summary)
+- Follow the structure strictly: Definition → Details → Basic Q → Hard Q → Olympiad Q for EACH topic
+- Questions MUST include answers and solutions
+- Use proper mathematical notation where needed
+- Make content grade-appropriate for Class {request.gradeLevel}
 
-CONTENT STRUCTURE CHECKLIST:
-✓ Slide 1: Engaging intro with clear objectives
-✓ Early slides: Foundational concepts and definitions
-✓ Middle slides: Development, examples, applications
-✓ Later slides: Synthesis, complex applications
-✓ Final slide: Memorable summary and reflection
+Generate the complete deck now."""
 
-Generate the complete {request.numSlides}-slide presentation deck now. Make it engaging, clear, and immediately usable for classroom teaching."""
+            logger.info(f"Generating structured deck for {num_topics} topics: {topics_str}")
+            
+        else:
+            # Legacy format for backward compatibility (shouldn't normally reach here)
+            system_message = """You are an educational content designer. Create engaging presentation content."""
+            prompt = f"Create a simple deck about {request.topic} for {request.subject} grade {request.gradeLevel}"
+            logger.info(f"Generating legacy deck for topic: {request.topic}")
 
-        # Step 1: Generate slide text content
-        logger.info(f"Generating deck for topic: {request.topic}, subject: {request.subject}")
         result = await generate_json_completion(
             prompt=prompt,
             system_message=system_message,
-            max_tokens=3000,
+            max_tokens=4000,  # Increased for structured content
             temperature=0.7
         )
 
-        # Validate slide count matches request
-        if len(result["slides"]) != request.numSlides:
-            logger.warning(f"Generated {len(result['slides'])} slides but {request.numSlides} were requested")
+        # Validate slide count
+        expected_slides = len(topics_list) * 5 + 1 if use_structured else request.numSlides
+        if len(result["slides"]) != expected_slides:
+            logger.warning(f"Generated {len(result['slides'])} slides but {expected_slides} were expected")
 
         # Step 2: Route slides to appropriate visual generators
         logger.info(f"Analyzing {len(result['slides'])} slides for visual routing...")

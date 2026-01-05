@@ -69,12 +69,21 @@ Use this format for concept relationships."""
             diagram_prompt = """Create a Mermaid.js FLOWCHART diagram.
 
 FLOWCHART SYNTAX EXAMPLES:
+
+For LINEAR PROCESSES:
 flowchart TD
     A[Start] --> B{Question?}
     B -->|Yes| C[Action 1]
     B -->|No| D[Action 2]
     C --> E[End]
     D --> E
+
+For CYCLES (water cycle, life cycle, etc.):
+flowchart LR
+    A[Evaporation] --> B[Condensation]
+    B --> C[Precipitation]
+    C --> D[Collection]
+    D --> A
 
 SHAPE OPTIONS:
 - [Text] for rectangles
@@ -83,7 +92,13 @@ SHAPE OPTIONS:
 - ((Text)) for circles
 - >Text] for asymmetric shapes
 
-Use TD (top-down) or LR (left-right) direction."""
+DIRECTION:
+- TD (top-down) for linear processes
+- LR (left-right) for cycles and flows
+- Use LR for anything that repeats or cycles back
+
+IMPORTANT: If the content describes a CYCLE (water cycle, carbon cycle, life cycle, etc.),
+make the diagram CIRCULAR by connecting the last step back to the first step."""
 
         prompt = f"""Convert this educational slide content into a Mermaid.js diagram.
 
@@ -95,17 +110,26 @@ Subject: {subject}
 TASK:
 {diagram_prompt}
 
-REQUIREMENTS:
+CRITICAL SYNTAX RULES:
 1. Extract the key concepts, steps, or relationships from the content
 2. Create clear, readable node labels (max 4-5 words per node)
-3. Use appropriate shapes and connections
-4. Keep it simple - aim for 5-10 nodes maximum
-5. Use proper Mermaid syntax
-6. Make it educational and easy to understand
+3. **IMPORTANT**: Wrap ALL node labels in quotes if they contain special characters like parentheses, brackets, or colons
+   - CORRECT: A["Process (Step 1)"]
+   - WRONG: A[Process (Step 1)]
+4. Use simple node IDs (A, B, C, etc.) - no special characters in IDs
+5. Keep it simple - aim for 5-10 nodes maximum
+6. Avoid HTML tags in labels
+7. Use proper Mermaid syntax with proper escaping
+
+SAFE NODE LABEL EXAMPLES:
+- A["Photosynthesis Process"]
+- B["Light Reaction"]
+- C["Calvin Cycle"]
+- D["Glucose Production"]
 
 Return JSON format:
 {{
-    "mermaidCode": "flowchart TD\\n    A[Start]...",
+    "mermaidCode": "flowchart TD\\n    A[\\"Start\\"]...",
     "diagramType": "{diagram_type}",
     "nodeCount": 7,
     "description": "Brief description of what the diagram shows"

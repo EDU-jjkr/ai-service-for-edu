@@ -17,10 +17,13 @@ class Slide(BaseModel):
     visualMetadata: Optional[VisualMetadata] = None  # NEW: Visual generation metadata
 
 class DeckGenerateRequest(BaseModel):
-    topic: str
+    topics: List[str] = []  # List of topics from curriculum
+    topic: Optional[str] = None  # Backward compatibility for single topic
     subject: str
     gradeLevel: str
+    chapter: Optional[str] = None  # Chapter name from curriculum
     numSlides: int = 10
+    structuredFormat: Optional[bool] = False  # Use structured format (Def -> Details -> Q1 -> Q2 -> Q3)
 
 class DeckGenerateResponse(BaseModel):
     title: str
@@ -86,3 +89,30 @@ class FollowUpRequest(BaseModel):
 class FollowUpResponse(BaseModel):
     answer: str
     clarification: Optional[str] = None
+
+# Curriculum Plan Schemas
+class CurriculumPlanRequest(BaseModel):
+    gradeLevel: str
+    subject: str
+
+class TopicPlan(BaseModel):
+    name: str
+    objectives: List[str]
+    teachingMinutes: int
+    periods: int
+    keyPoints: List[str]
+
+class ChapterPlan(BaseModel):
+    name: str
+    topics: List[TopicPlan]
+    totalMinutes: int
+    totalPeriods: int
+
+class CurriculumPlanResponse(BaseModel):
+    title: str
+    subject: str
+    gradeLevel: str
+    totalHours: int
+    totalPeriods: int
+    chapters: List[ChapterPlan]
+

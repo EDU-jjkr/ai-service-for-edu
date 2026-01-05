@@ -287,3 +287,123 @@ async def modify_lesson_plan(request: LessonPlanModifyRequest):
     except Exception as e:
         logger.error(f"Lesson plan modification failed: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to modify lesson plan: {str(e)}")
+
+
+@router.post("/generate-curriculum-plan")
+async def generate_curriculum_plan(request_data: dict):
+    """Generate a comprehensive curriculum plan with objectives and time estimates for each topic"""
+    try:
+        grade_level = request_data.get("gradeLevel", "")
+        subject = request_data.get("subject", "")
+        chapters = request_data.get("chapters", [])  # Full curriculum data from backend
+        
+        if not grade_level or not subject:
+            raise HTTPException(status_code=400, detail="gradeLevel and subject are required")
+        
+        # Build chapter/topic list for prompt
+        curriculum_text = ""
+        for chapter in chapters:
+            chapter_name = chapter.get("name", "")
+            topics = chapter.get("topics", [])
+            topic_names = [t.get("name", "") for t in topics]
+            curriculum_text += f"\n**{chapter_name}**:\n"
+            for t in topic_names:
+                curriculum_text += f"  - {t}\n"
+        
+        system_message = """You are an expert curriculum planner with deep knowledge of educational standards, pedagogy, and classroom time management.
+
+Your task is to analyze a curriculum and provide:
+1. Clear learning objectives for each topic (2-3 measurable objectives using Bloom's taxonomy verbs)
+2. Realistic time estimates based on topic complexity
+3. Key teaching points that capture the essence of each topic
+
+You understand that:
+- One class period = 40-45 minutes
+- Complex topics need more time
+- Objectives should be SMART (Specific, Measurable, Achievable, Relevant, Time-bound)
+- Key points should be memorable and concise
+
+Always respond with valid JSON."""
+
+        prompt = f"""Generate a comprehensive curriculum teaching plan.
+
+CURRICULUM DETAILS:
+- Grade Level: Class {grade_level}
+- Subject: {subject}
+- Curriculum Overview:
+{curriculum_text}
+
+For EACH topic in EACH chapter, generate:
+
+1. **objectives** (2-3 learning objectives per topic):
+   - Start with action verbs (Define, Explain, Calculate, Analyze, Compare, etc.)
+   - Be specific to the topic content
+   - Appropriate for Class {grade_level} students
+
+2. **teachingMinutes** (estimated teaching time):
+   - Simple concepts: 30-45 minutes (1 period)
+   - Moderate concepts: 60-90 minutes (2 periods)
+   - Complex concepts: 90-135 minutes (3 periods)
+   - Very complex: 135-180 minutes (4 periods)
+
+3. **periods** (number of class periods, 1 period = 45 min)
+
+4. **keyPoints** (3-5 essential teaching points):
+   - Core formulas, definitions, or principles
+   - Common misconceptions to address
+   - Important examples or applications
+
+OUTPUT FORMAT (return as JSON):
+{{
+    "title": "Class {grade_level} {subject} - Complete Curriculum Plan",
+    "subject": "{subject}",
+    "gradeLevel": "{grade_level}",
+    "totalHours": <calculated sum of all hours>,
+    "totalPeriods": <calculated sum of all periods>,
+    "chapters": [
+        {{
+            "name": "Chapter Name",
+            "totalMinutes": <sum of topic minutes>,
+            "totalPeriods": <sum of topic periods>,
+            "topics": [
+                {{
+                    "name": "Topic Name",
+                    "objectives": [
+                        "Students will be able to define...",
+                        "Students will be able to explain..."
+                    ],
+                    "teachingMinutes": 60,
+                    "periods": 2,
+                    "keyPoints": [
+                        "Key formula or concept",
+                        "Important application",
+                        "Common mistake to avoid"
+                    ]
+                }}
+            ]
+        }}
+    ]
+}}
+
+QUALITY STANDARDS:
+- Every topic from the curriculum must be included
+- Time estimates should be realistic for Class {grade_level}
+- Objectives must be actionable and measurable
+- Key points should enable quick lesson prep
+- Total hours should reflect a typical academic year allocation
+
+Generate the complete curriculum plan now."""
+
+        result = await generate_json_completion(
+            prompt=prompt,
+            system_message=system_message,
+            max_tokens=4000,
+            temperature=0.6
+        )
+        
+        # Validate and return
+        return result
+
+    except Exception as e:
+        logger.error(f"Curriculum plan generation failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate curriculum plan: {str(e)}")
