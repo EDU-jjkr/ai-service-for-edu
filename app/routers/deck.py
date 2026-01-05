@@ -115,6 +115,9 @@ async def generate_deck(request: DeckGenerateRequest):
         if not topics_list:
             raise HTTPException(status_code=400, detail="No topics provided")
         
+        # DEFENSIVE: Ensure all topics are strings (handle any edge cases)
+        topics_list = [str(topic) for topic in topics_list if topic]
+        
         # Use structured format if requested or if we have multiple topics
         use_structured = request.structuredFormat or len(topics_list) > 0
         
@@ -222,9 +225,15 @@ After all topics are covered, create ONE summary slide:
   • 2-3 key takeaways
 - No new content, just consolidation.
 
-TOPICS TO COVER (in order):
-{chr(10).join([f"{i+1}. {topic}" for i, topic in enumerate(topics_list)])}
 
+TOPICS TO COVER (in order):
+"""
+            
+            # Construct topics list formatting outside the f-string to prevent "expected string or bytes-like object" errors
+            topics_formatted = "\n".join([f"{i+1}. {topic}" for i, topic in enumerate(topics_list)])
+            prompt += topics_formatted + "\n"
+            
+            prompt += f"""
 OUTPUT FORMAT:
 {{
     "title": "{request.chapter or topics_list[0]}: Complete Teaching Deck",

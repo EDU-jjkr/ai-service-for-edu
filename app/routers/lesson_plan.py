@@ -18,8 +18,10 @@ router = APIRouter()
 async def generate_lesson_plan(request: LessonPlanGenerateRequest):
     """Generate a complete lesson plan using AI"""
     try:
-        topics_str = ", ".join(request.topics)
-        num_topics = len(request.topics)
+        # DEFENSIVE: Ensure all topics are strings and filter out empty ones
+        topics_list = [str(topic) for topic in request.topics if topic]
+        topics_str = ", ".join(topics_list)
+        num_topics = len(topics_list)
         
         # Calculate time allocations using research-based lesson structure
         warmup_time = max(5, int(request.totalDuration * 0.10))  # 10% for engagement

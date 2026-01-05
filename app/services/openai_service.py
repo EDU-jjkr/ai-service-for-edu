@@ -44,6 +44,14 @@ async def generate_json_completion(
             response_format={"type": "json_object"}
         )
         import json
-        return json.loads(response.choices[0].message.content)
+        content = response.choices[0].message.content
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError as json_err:
+            print(f"JSON Parse Error: {str(json_err)}")
+            print(f"Raw Content: {content}")
+            # Try to recover if it's just a simple formatting issue (optional simple fix)
+            # For now, just re-raise with more info
+            raise Exception(f"Failed to parse JSON response: {str(json_err)}")
     except Exception as e:
         raise Exception(f"OpenAI API error: {str(e)}")

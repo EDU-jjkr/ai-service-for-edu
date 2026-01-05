@@ -8,6 +8,13 @@ router = APIRouter()
 async def generate_activity(request: ActivityGenerateRequest):
     """Generate a classroom activity using AI"""
     try:
+        # DEFENSIVE: Ensure all string fields are actually strings
+        topic = str(request.topic) if request.topic else ""
+        subject = str(request.subject) if request.subject else ""
+        gradeLevel = str(request.gradeLevel) if request.gradeLevel else ""
+        activityType = str(request.activityType) if request.activityType else ""
+        duration = int(request.duration) if request.duration else 30
+        
         # Enhanced system message with clear role and expertise
         system_message = """You are an award-winning educator with 15+ years of experience designing classroom activities across all grade levels and subjects. You specialize in creating engaging, hands-on learning experiences that cater to diverse learning styles and abilities.
 
@@ -24,11 +31,11 @@ You always respond with valid, well-structured JSON that teachers can immediatel
         prompt = f"""Design a comprehensive classroom activity based on the following specifications:
 
 ACTIVITY PARAMETERS:
-- Topic: "{request.topic}"
-- Subject: {request.subject}
-- Grade Level: {request.gradeLevel}
-- Duration: {request.duration} minutes
-- Activity Type: {request.activityType}
+- Topic: "{topic}"
+- Subject: {subject}
+- Grade Level: {gradeLevel}
+- Duration: {duration} minutes
+- Activity Type: {activityType}
 
 DESIGN REQUIREMENTS:
 
@@ -80,7 +87,7 @@ OUTPUT FORMAT (return as JSON):
 }}
 
 CRITICAL REQUIREMENTS:
-- Ensure activity is realistically completable in {request.duration} minutes
+- Ensure activity is realistically completable in {duration} minutes
 - All materials must be safe and age-appropriate
 - Steps must be numbered/sequenced logically
 - Include timing estimates within steps
@@ -92,7 +99,7 @@ Generate the activity now. Be specific, practical, and creative."""
         result = await generate_json_completion(
             prompt=prompt,
             system_message=system_message,
-            max_tokens=2000,
+            max_tokens=3000,
             temperature=0.7
         )
 

@@ -38,9 +38,9 @@ class ActivityGenerateRequest(BaseModel):
 
 class ActivityGenerateResponse(BaseModel):
     title: str
-    materials: List[str]
-    steps: List[str]
-    learningOutcomes: List[str]
+    materials: List[str] = []
+    steps: List[str] = []
+    learningOutcomes: List[str] = []  # Made optional with default to handle AI inconsistency
 
 class LessonPlanGenerateRequest(BaseModel):
     topics: List[str]
