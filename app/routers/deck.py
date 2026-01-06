@@ -10,6 +10,26 @@ import json
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+# Subject Classification Helper
+def classify_subject(subject: str) -> str:
+    """
+    Classify a subject as either 'quantitative' or 'descriptive'.
+    
+    Quantitative subjects focus on numerical calculations and formulas.
+    Descriptive subjects focus on concepts, analysis, and interpretation.
+    """
+    quantitative_keywords = [
+        'math', 'physics', 'chemistry', 'economics', 'accounting', 
+        'statistics', 'computer science', 'cs', 'calculus', 'algebra'
+    ]
+    
+    subject_lower = subject.lower()
+    
+    # Check if any quantitative keyword is in the subject name
+    is_quantitative = any(keyword in subject_lower for keyword in quantitative_keywords)
+    
+    return 'quantitative' if is_quantitative else 'descriptive'
+
 # ... (generate_deck function stays here, simplified for brevity in this replace block if not editing it) ...
 
 @router.post("/modify-deck", response_model=DeckGenerateResponse)
@@ -122,8 +142,17 @@ async def generate_deck(request: DeckGenerateRequest):
         use_structured = request.structuredFormat or len(topics_list) > 0
         
         if use_structured:
-            # NEW STRUCTURED FORMAT: 5 slides per topic + 1 summary
-            system_message = """You are an expert educational content designer specializing in creating structured teaching decks.
+            # Classify subject type
+            subject_type = classify_subject(request.subject)
+            logger.info(f"Subject '{request.subject}' classified as: {subject_type}")
+            
+            topics_str = ", ".join(topics_list)
+            num_topics = len(topics_list)
+            total_slides = num_topics * 5 + 1  # 5 per topic + 1 summary
+            
+            # === QUANTITATIVE SUBJECTS (Math, Physics, Chemistry) ===
+            if subject_type == 'quantitative':
+                system_message = """You are an expert educational content designer specializing in creating structured teaching decks.
             
 Your decks follow a precise pedagogical structure for each topic:
 1. Definition - Clear, concise definition of the concept
@@ -140,11 +169,7 @@ You create content that is:
 
 Always respond with valid JSON."""
 
-            topics_str = ", ".join(topics_list)
-            num_topics = len(topics_list)
-            total_slides = num_topics * 5 + 1  # 5 per topic + 1 summary
-            
-            prompt = f"""Generate a structured teaching deck for the following:
+                prompt = f"""Generate a structured teaching deck for the following:
 
 SPECIFICATIONS:
 - Subject: {request.subject}
@@ -229,7 +254,110 @@ After all topics are covered, create ONE summary slide:
 TOPICS TO COVER (in order):
 """
             
-            # Construct topics list formatting outside the f-string to prevent "expected string or bytes-like object" errors
+            # === DESCRIPTIVE SUBJECTS (English, History, Geography, etc.) ===
+            else:
+                system_message = """You are an expert educational content designer specializing in creating structured teaching decks for descriptive subjects.
+
+Your decks follow a precise pedagogical structure for each topic:
+1. Definition/Key Term - Clear explanation of the concept or term
+2. Explanation with Context - Detailed explanation with historical/literary context
+3. Easy Question - Recall/identification question
+4. Medium Question - Analysis/comparison question
+5. Hard Question - Synthesis/evaluation question
+
+You create content that is:
+- Age-appropriate for the specified grade level
+- Historically/contextually accurate
+- Engaging and thought-provoking
+- Properly formatted for presentation
+
+Always respond with valid JSON."""
+
+                prompt = f"""Generate a structured teaching deck for the following:
+
+SPECIFICATIONS:
+- Subject: {request.subject}
+- Grade Level: {request.gradeLevel}
+- Chapter: {request.chapter or 'General'}
+- Topics: {topics_str}
+- Number of Topics: {num_topics}
+- Total Slides Required: {total_slides}
+
+STRICT STRUCTURE (follow this EXACTLY for EACH topic):
+
+For each topic, create exactly 5 slides in this order:
+
+**Slide Type 1: DEFINITION/KEY TERM**
+- Title: "[Topic Name]: Key Concept"
+- Content: Clear definition or explanation of the key term.
+  • Define the concept in 2-3 sentences
+  • Provide historical/literary context if relevant
+  • Mention significance or importance
+
+**Slide Type 2: EXPLANATION WITH CONTEXT**
+- Title: "Understanding [Topic Name]"
+- Content: Detailed explanation with:
+  • Background and historical/literary context
+  • Key characteristics or features
+  • Real-world examples or case studies
+  • Connections to other related concepts
+- Use bullet points, 4-6 points.
+
+**Slide Type 3: EASY QUESTION (Recall/Identification)**
+- Title: "[Topic Name]: Practice Question 1"
+- Content: Question testing basic understanding and recall.
+  • "Who was...", "What is...", "When did...", "Where did..."
+  • For MCQ, provide 4 options (A, B, C, D)
+  • Include "Answer: [correct answer]" at the end
+  • Brief explanation
+
+📊 EASY DIFFICULTY BOUNDARIES:
+- Question type: Direct recall, identification, basic facts
+- Completion time: Under 5 minutes
+- Cognitive level: Remember, Identify
+
+**Slide Type 4: MEDIUM QUESTION (Analysis/Comparison)**
+- Title: "[Topic Name]: Practice Question 2 (Analytical)"
+- Content: Question requiring analysis or comparison.
+  • "Compare X and Y", "Explain the significance of...", "What were the causes of..."
+  • "Differentiate between...", "Describe the characteristics of..."
+  • Include "Answer:" with detailed explanation
+  • Mention multiple aspects or perspectives
+
+📊 MEDIUM DIFFICULTY BOUNDARIES:
+- Question type: Compare, Contrast, Explain, Analyze
+- Completion time: 10-15 minutes
+- Cognitive level: Understand, Analyze, Compare
+
+**Slide Type 5: HARD QUESTION (Synthesis/Evaluation)**
+- Title: "[Topic Name]: Challenge Question (Critical Thinking)"
+- Content: Question requiring synthesis and evaluation.
+  • "How does X relate to Y?", "Analyze the impact of...", "Evaluate the role of..."
+  • "To what extent...", "Justify...", "Critically assess..."
+  • Include "Approach:" with thinking framework
+  • Include "Answer:" with comprehensive analysis
+  • Discuss multiple viewpoints or interpretations
+
+📊 HARD DIFFICULTY BOUNDARIES:
+- Question type: Evaluate, Synthesize, Justify, Critically analyze
+- Completion time: 20-30 minutes
+- Cognitive level: Synthesize, Evaluate, Create connections
+- Target: Requires deep understanding and critical thinking
+
+**FINAL SLIDE: SUMMARY**
+After all topics are covered, create ONE summary slide:
+- Title: "Today's Learning Summary"
+- Content: Bullet points covering:
+  • Each topic we covered
+  • Key concepts/events/ideas to remember
+  • 2-3 key takeaways or insights
+- No new content, just consolidation.
+
+
+TOPICS TO COVER (in order):
+"""
+            
+            # Construct topics list formatting (common for both)
             topics_formatted = "\n".join([f"{i+1}. {topic}" for i, topic in enumerate(topics_list)])
             prompt += topics_formatted + "\n"
             
@@ -246,14 +374,13 @@ OUTPUT FORMAT:
 
 IMPORTANT:
 - Generate EXACTLY {total_slides} slides ({num_topics} topics × 5 slides + 1 summary)
-- Follow the structure strictly: Definition → Details → Basic Q → Hard Q → Olympiad Q for EACH topic
-- Questions MUST include answers and solutions
-- Use proper mathematical notation where needed
+- Follow the structure strictly: Definition → Explanation → Easy Q → Medium Q → Hard Q for EACH topic
+- Questions MUST include answers and detailed explanations
 - Make content grade-appropriate for Class {request.gradeLevel}
 
 Generate the complete deck now."""
 
-            logger.info(f"Generating structured deck for {num_topics} topics: {topics_str}")
+            logger.info(f"Generating structured {subject_type} deck for {num_topics} topics: {topics_str}")
             
         else:
             # Legacy format for backward compatibility (shouldn't normally reach here)
