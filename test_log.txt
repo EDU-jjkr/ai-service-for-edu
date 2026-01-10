@@ -1,0 +1,55 @@
+============================================================
+CHALKIE END-TO-END TEST SUITE
+============================================================
+
+STARTING Test: Complete Pipeline JSON
+Endpoint: http://localhost:8000/api/deck/generate-complete
+Payload: {
+  "topic": "Newton's Laws of Motion",
+  "subject": "Physics",
+  "gradeLevel": "11",
+  "theme": "default"
+}
+SUCCESS! (Duration: 10.25s)
+Error during test: 'utf-8' codec can't decode byte 0xb5 in position 10: invalid start byte
+
+STARTING Test: Differentiation Levels
+Endpoint: http://localhost:8000/api/deck/generate-all-levels
+Payload: {
+  "topic": "Photosynthesis",
+  "subject": "Biology",
+  "gradeLevel": "9",
+  "theme": "science_nature"
+}
+SUCCESS! (Duration: 9.88s)
+Result saved to: test_outputs\differentiation_levels.json
+   Versions generated: Support(3), Core(9), Extension(6)
+
+STARTING Test: Support Level Generation
+Endpoint: http://localhost:8000/api/deck/generate-level/support
+Payload: {
+  "topic": "Atomic Structure",
+  "subject": "Chemistry",
+  "gradeLevel": "10",
+  "theme": "default"
+}
+SUCCESS! (Duration: 8.65s)
+Result saved to: test_outputs\support_level_generation.json
+   Slide count: 3
+   Curriculum alignment check: []
+
+STARTING Test: Complete PPTX Export
+Endpoint: http://localhost:8000/api/deck/generate-deck-pptx
+Payload: {
+  "topic": "Structure of a Cell",
+  "subject": "Biology",
+  "gradeLevel": "8",
+  "theme": "science_nature"
+}
+SUCCESS! (Duration: 4.21s)
+File saved to: test_outputs\complete_pptx_export.pptx
+
+============================================================
+TEST SUITE FINISHED
+Check 'test_outputs' for all generated files.
+============================================================

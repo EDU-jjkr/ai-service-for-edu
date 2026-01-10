@@ -1,0 +1,4 @@
+python-pptx==0.6.21
+qdrant-client==1.7.0
+pillow==10.2.0
+sentence-transformers==2.2.2

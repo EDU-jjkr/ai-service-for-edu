@@ -1,33 +1,23 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import List, Optional, Dict, Any
 
-class VisualMetadata(BaseModel):
-    """Metadata for slide visualizations"""
-    visualType: Optional[str] = None  # 'diagram', 'chart', 'math', 'illustration', 'none'
-    visualConfig: Optional[Dict[str, Any]] = None  # Tool-specific configuration
-    confidence: Optional[float] = None  # Confidence score 0-100
-    generatedBy: Optional[str] = None  # 'mermaid', 'chartjs', 'latex', 'dalle3'
-    reasoning: Optional[str] = None  # Why this visual type was chosen
-
-class Slide(BaseModel):
-    title: str
-    content: str
-    order: int
-    imageUrl: Optional[str] = None
-    visualMetadata: Optional[VisualMetadata] = None  # NEW: Visual generation metadata
-
-class DeckGenerateRequest(BaseModel):
-    topics: List[str] = []  # List of topics from curriculum
-    topic: Optional[str] = None  # Backward compatibility for single topic
-    subject: str
-    gradeLevel: str
-    chapter: Optional[str] = None  # Chapter name from curriculum
-    numSlides: int = 10
-    structuredFormat: Optional[bool] = False  # Use structured format (Def -> Details -> Q1 -> Q2 -> Q3)
-
-class DeckGenerateResponse(BaseModel):
-    title: str
-    slides: List[Slide]
+# Import lesson schemas (new Chalkie-inspired schemas)
+from app.models.lesson_schema import (
+    BloomLevel,
+    PedagogicalModel,
+    SlideType,
+    LessonMetadata,
+    LearningObjective,
+    VocabularyTerm,
+    LearningStructure,
+    LessonDeck,
+    DifferentiationLevel,
+    VisualMetadata,
+    Slide,
+    DeckGenerateRequest,
+    DeckGenerateResponse,
+    DeckGenerateResponseLegacy
+)
 
 class ActivityGenerateRequest(BaseModel):
     topic: str

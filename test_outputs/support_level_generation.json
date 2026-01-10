@@ -1,0 +1,73 @@
+{
+  "meta": {
+    "lesson_id": "8baaa7b3-24b1-4ba8-89e1-0b55b702183c",
+    "topic": "Atomic Structure (SUPPORT Level)",
+    "subject": "Chemistry",
+    "grade": "10",
+    "standards": [],
+    "theme": "default",
+    "pedagogical_model": "I_DO_WE_DO_YOU_DO",
+    "created_at": "2026-01-08T08:08:02.306949"
+  },
+  "structure": {
+    "learning_objectives": [
+      {
+        "objective": "Define Atomic Structure and recall the basic components",
+        "bloom_level": "REMEMBER"
+      },
+      {
+        "objective": "Explain the structure of an atom and the roles of protons, neutrons, and electrons",
+        "bloom_level": "UNDERSTAND"
+      },
+      {
+        "objective": "Describe how electrons are arranged in energy levels around the nucleus",
+        "bloom_level": "UNDERSTAND"
+      }
+    ],
+    "vocabulary": [],
+    "prerequisites": [],
+    "bloom_progression": [
+      "REMEMBER",
+      "UNDERSTAND",
+      "UNDERSTAND"
+    ]
+  },
+  "slides": [
+    {
+      "title": "Understanding Atomic Structure",
+      "content": "UNDERSTANDING ATOMIC STRUCTURE\n\n- Atoms are tiny building blocks that make up everything around us.\n- Atoms have even smaller parts called protons, neutrons, and electrons.\n- Protons have a positive charge, electrons have a negative charge, and neutrons have no charge.",
+      "order": 0,
+      "slideType": "INTRODUCTION",
+      "bloom_level": "REMEMBER",
+      "objective": "Define Atomic Structure and recall the basic components",
+      "speakerNotes": "SUPPORT Level: Simplified vocabulary and concepts for struggling learners. Focus on foundational understanding.",
+      "imageQuery": null,
+      "imageUrl": null,
+      "visualMetadata": null
+    },
+    {
+      "title": "Parts of an Atom",
+      "content": "Title: Parts of an Atom\n\nContent:\n1. Atoms are tiny building blocks of everything.\n2. Atoms have three parts: protons, neutrons, and electrons.\n3. Protons have a positive charge, electrons have a negative charge, and neutrons have no charge.",
+      "order": 1,
+      "slideType": "CONCEPT",
+      "bloom_level": "UNDERSTAND",
+      "objective": "Explain the structure of an atom and the roles of protons, neutrons, and electrons",
+      "speakerNotes": "SUPPORT Level: Simplified vocabulary and concepts for struggling learners. Focus on foundational understanding.",
+      "imageQuery": null,
+      "imageUrl": null,
+      "visualMetadata": null
+    },
+    {
+      "title": "Electron Configuration",
+      "content": "TITLE: How Electrons are Arranged\n\n- Electrons are tiny particles that move around the center of an atom (like planets orbiting the sun).\n- Each atom has a specific way its electrons are organized, called electron configuration (how electrons are arranged in an atom).\n- Understanding electron configuration helps us know how atoms interact with each other (how atoms connect with one another).",
+      "order": 2,
+      "slideType": "CONCEPT",
+      "bloom_level": "UNDERSTAND",
+      "objective": "Describe how electrons are arranged in energy levels around the nucleus",
+      "speakerNotes": "SUPPORT Level: Simplified vocabulary and concepts for struggling learners. Focus on foundational understanding.",
+      "imageQuery": null,
+      "imageUrl": null,
+      "visualMetadata": null
+    }
+  ]
+}

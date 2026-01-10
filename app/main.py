@@ -23,13 +23,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include routers
-app.include_router(deck.router, prefix="/api", tags=["Deck Generation"])
-app.include_router(activity.router, prefix="/api", tags=["Activity Generation"])
-app.include_router(lesson_plan.router, prefix="/api", tags=["Lesson Plans"])
-app.include_router(doubt_solver.router, prefix="/api", tags=["Doubt Solver"])
-app.include_router(textbook.router, prefix="/api", tags=["Textbook Index"])
-app.include_router(topic.router, prefix="/api", tags=["Topic Generation"])
+# Include routers with descriptive prefixes
+app.include_router(deck.router, prefix="/api/deck", tags=["Deck"])
+app.include_router(activity.router, prefix="/api/activity", tags=["Activity"])
+app.include_router(lesson_plan.router, prefix="/api/lesson-plan", tags=["Lesson Plans"])
+app.include_router(doubt_solver.router, prefix="/api/doubt-solver", tags=["Doubt Solver"])
+app.include_router(textbook.router, prefix="/api/textbook", tags=["Textbook Index"])
+app.include_router(topic.router, prefix="/api/topic", tags=["Topic Generation"])
 
 @app.get("/")
 async def root():

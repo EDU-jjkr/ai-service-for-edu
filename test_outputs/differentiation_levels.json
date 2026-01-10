@@ -1,0 +1,347 @@
+{
+  "support": {
+    "deck": {
+      "meta": {
+        "lesson_id": "0600cade-1ac7-451e-afba-6e039e176385",
+        "topic": "Photosynthesis (SUPPORT Level)",
+        "subject": "Biology",
+        "grade": "9",
+        "standards": [],
+        "theme": "science_nature",
+        "pedagogical_model": "I_DO_WE_DO_YOU_DO",
+        "created_at": "2026-01-08T08:07:50.300205"
+      },
+      "structure": {
+        "learning_objectives": [
+          {
+            "objective": "Define photosynthesis and recall the key components",
+            "bloom_level": "REMEMBER"
+          },
+          {
+            "objective": "Explain the processes of light reactions and Calvin cycle",
+            "bloom_level": "UNDERSTAND"
+          },
+          {
+            "objective": "Summarize the chemical equation of photosynthesis",
+            "bloom_level": "UNDERSTAND"
+          }
+        ],
+        "vocabulary": [],
+        "prerequisites": [],
+        "bloom_progression": [
+          "REMEMBER",
+          "UNDERSTAND",
+          "UNDERSTAND"
+        ]
+      },
+      "slides": [
+        {
+          "title": "Introduction to Photosynthesis",
+          "content": "Title: Let's Learn About How Plants Make Food\n\n- Plants make their own food using sunlight. This process is called photosynthesis (making food from light).\n- The green parts of plants, like leaves, use sunlight to make food.\n- Sunlight helps plants grow and stay healthy by giving them energy to make their food.",
+          "order": 0,
+          "slideType": "INTRODUCTION",
+          "bloom_level": "REMEMBER",
+          "objective": "Define photosynthesis and recall the key components",
+          "speakerNotes": "SUPPORT Level: Simplified vocabulary and concepts for struggling learners. Focus on foundational understanding.",
+          "imageQuery": null,
+          "imageUrl": null,
+          "visualMetadata": null
+        },
+        {
+          "title": "Key Processes in Photosynthesis",
+          "content": "SUPPORT LEVEL CONTENT:\n\n- Plants use sunlight to make their own food.\n- This process is called photosynthesis (making food from light).\n- The green parts of plants absorb sunlight to make food.",
+          "order": 1,
+          "slideType": "CONCEPT",
+          "bloom_level": "UNDERSTAND",
+          "objective": "Explain the processes of light reactions and Calvin cycle",
+          "speakerNotes": "SUPPORT Level: Simplified vocabulary and concepts for struggling learners. Focus on foundational understanding.",
+          "imageQuery": null,
+          "imageUrl": null,
+          "visualMetadata": null
+        },
+        {
+          "title": "Photosynthesis Equation",
+          "content": "Title: Making Food from Light\n\n1. Plants use sunlight to make their own food.\n2. The green parts of plants absorb the sunlight.\n3. This process is called photosynthesis (making food from light).",
+          "order": 2,
+          "slideType": "CONCEPT",
+          "bloom_level": "UNDERSTAND",
+          "objective": "Summarize the chemical equation of photosynthesis",
+          "speakerNotes": "SUPPORT Level: Simplified vocabulary and concepts for struggling learners. Focus on foundational understanding.",
+          "imageQuery": null,
+          "imageUrl": null,
+          "visualMetadata": null
+        }
+      ]
+    },
+    "slide_count": 3
+  },
+  "core": {
+    "deck": {
+      "meta": {
+        "lesson_id": "278e13b7-2750-4b3f-aaea-14b5ea82f936",
+        "topic": "Photosynthesis",
+        "subject": "Biology",
+        "grade": "9",
+        "standards": [],
+        "theme": "science_nature",
+        "pedagogical_model": "I_DO_WE_DO_YOU_DO",
+        "created_at": "2026-01-08T08:07:48.717731"
+      },
+      "structure": {
+        "learning_objectives": [
+          {
+            "objective": "Define photosynthesis and recall the key components",
+            "bloom_level": "REMEMBER"
+          },
+          {
+            "objective": "Explain the processes of light reactions and Calvin cycle",
+            "bloom_level": "UNDERSTAND"
+          },
+          {
+            "objective": "Summarize the chemical equation of photosynthesis",
+            "bloom_level": "UNDERSTAND"
+          }
+        ],
+        "vocabulary": [],
+        "prerequisites": [],
+        "bloom_progression": [
+          "REMEMBER",
+          "UNDERSTAND",
+          "UNDERSTAND",
+          "APPLY",
+          "APPLY",
+          "ANALYZE",
+          "ANALYZE",
+          "EVALUATE",
+          "CREATE"
+        ]
+      },
+      "slides": [
+        {
+          "title": "Introduction to Photosynthesis",
+          "content": "Content generation in progress. Please regenerate this slide.",
+          "order": 0,
+          "slideType": "INTRODUCTION",
+          "bloom_level": "REMEMBER",
+          "objective": "Define photosynthesis and recall the key components",
+          "speakerNotes": "",
+          "imageQuery": null,
+          "imageUrl": null,
+          "visualMetadata": null
+        },
+        {
+          "title": "Key Processes in Photosynthesis",
+          "content": "Content generation in progress. Please regenerate this slide.",
+          "order": 1,
+          "slideType": "CONCEPT",
+          "bloom_level": "UNDERSTAND",
+          "objective": "Explain the processes of light reactions and Calvin cycle",
+          "speakerNotes": "",
+          "imageQuery": null,
+          "imageUrl": null,
+          "visualMetadata": null
+        },
+        {
+          "title": "Photosynthesis Equation",
+          "content": "Content generation in progress. Please regenerate this slide.",
+          "order": 2,
+          "slideType": "CONCEPT",
+          "bloom_level": "UNDERSTAND",
+          "objective": "Summarize the chemical equation of photosynthesis",
+          "speakerNotes": "",
+          "imageQuery": null,
+          "imageUrl": null,
+          "visualMetadata": null
+        },
+        {
+          "title": "Photosynthesis in Action",
+          "content": "Content generation in progress. Please regenerate this slide.",
+          "order": 3,
+          "slideType": "ACTIVITY",
+          "bloom_level": "APPLY",
+          "objective": "Apply knowledge to identify the role of chlorophyll in photosynthesis",
+          "speakerNotes": "",
+          "imageQuery": null,
+          "imageUrl": null,
+          "visualMetadata": null
+        },
+        {
+          "title": "Comparing Photosynthesis and Respiration",
+          "content": "Content generation in progress. Please regenerate this slide.",
+          "order": 4,
+          "slideType": "ACTIVITY",
+          "bloom_level": "APPLY",
+          "objective": "Analyze and differentiate between photosynthesis and cellular respiration",
+          "speakerNotes": "",
+          "imageQuery": null,
+          "imageUrl": null,
+          "visualMetadata": null
+        },
+        {
+          "title": "Analyzing Photosynthesis Efficiency",
+          "content": "Content generation in progress. Please regenerate this slide.",
+          "order": 5,
+          "slideType": "ACTIVITY",
+          "bloom_level": "ANALYZE",
+          "objective": "Analyze factors affecting the efficiency of photosynthesis",
+          "speakerNotes": "",
+          "imageQuery": null,
+          "imageUrl": null,
+          "visualMetadata": null
+        },
+        {
+          "title": "Critical Thinking: Photosynthesis Adaptations",
+          "content": "Content generation in progress. Please regenerate this slide.",
+          "order": 6,
+          "slideType": "ASSESSMENT",
+          "bloom_level": "ANALYZE",
+          "objective": "Evaluate plant adaptations that enhance photosynthesis efficiency",
+          "speakerNotes": "",
+          "imageQuery": null,
+          "imageUrl": null,
+          "visualMetadata": null
+        },
+        {
+          "title": "Evaluation of Photosynthesis Importance",
+          "content": "Content generation in progress. Please regenerate this slide.",
+          "order": 7,
+          "slideType": "ASSESSMENT",
+          "bloom_level": "EVALUATE",
+          "objective": "Assess the significance of photosynthesis in the ecosystem",
+          "speakerNotes": "",
+          "imageQuery": null,
+          "imageUrl": null,
+          "visualMetadata": null
+        },
+        {
+          "title": "Synthesis of Photosynthesis Knowledge",
+          "content": "Content generation in progress. Please regenerate this slide.",
+          "order": 8,
+          "slideType": "SUMMARY",
+          "bloom_level": "CREATE",
+          "objective": "Create a visual representation showing the interconnected processes of photosynthesis",
+          "speakerNotes": "",
+          "imageQuery": null,
+          "imageUrl": null,
+          "visualMetadata": null
+        }
+      ]
+    },
+    "slide_count": 9
+  },
+  "extension": {
+    "deck": {
+      "meta": {
+        "lesson_id": "fa344ce6-60cb-4dab-b3e6-3e5b102ed9b2",
+        "topic": "Photosynthesis (EXTENSION Level)",
+        "subject": "Biology",
+        "grade": "9",
+        "standards": [],
+        "theme": "science_nature",
+        "pedagogical_model": "I_DO_WE_DO_YOU_DO",
+        "created_at": "2026-01-08T08:07:53.645251"
+      },
+      "structure": {
+        "learning_objectives": [
+          {
+            "objective": "Define photosynthesis and recall the key components",
+            "bloom_level": "REMEMBER"
+          },
+          {
+            "objective": "Explain the processes of light reactions and Calvin cycle",
+            "bloom_level": "UNDERSTAND"
+          },
+          {
+            "objective": "Summarize the chemical equation of photosynthesis",
+            "bloom_level": "UNDERSTAND"
+          }
+        ],
+        "vocabulary": [],
+        "prerequisites": [],
+        "bloom_progression": [
+          "APPLY",
+          "APPLY",
+          "ANALYZE",
+          "ANALYZE",
+          "EVALUATE",
+          "CREATE"
+        ]
+      },
+      "slides": [
+        {
+          "title": "Photosynthesis in Action",
+          "content": "Title: Unveiling the Intricacies of Photosynthetic Processes\n\nContent: Witness the intricate dance of biochemical transformations as nature's green machines harness the power of sunlight to synthesize organic compounds vital for life.\n\nDelve into the complexities of photosynthesis by exploring the intricate interplay of photosystems I and II, the Calvin cycle, and the electron transport chain. Unravel the mysteries of photoexcitation, photophosphorylation, and carbon fixation mechanisms that drive this fundamental process in autotrophic organisms.\n\nCritical Thinking Question: How do environmental factors such as light intensity, temperature, and water availability influence the efficiency of photosynthesis in plants?\n\nResearch Challenge: Investigate the role of photosynthesis in mitigating climate change through carbon sequestration and its implications for global ecosystems. Explore interdisciplinary connections between photosynthesis and sustainability practices in agriculture, forestry, and biotechnology.\n\nUnlock the potential of photosynthesis as a sustainable energy source and contemplate the future possibilities of biologically inspired technologies that mimic nature's elegant solution to energy conversion challenges.",
+          "order": 3,
+          "slideType": "ACTIVITY",
+          "bloom_level": "APPLY",
+          "objective": "Apply knowledge to identify the role of chlorophyll in photosynthesis",
+          "speakerNotes": "EXTENSION Level: Advanced content with critical thinking challenges for gifted learners. Emphasizes higher-order skills.",
+          "imageQuery": null,
+          "imageUrl": null,
+          "visualMetadata": null
+        },
+        {
+          "title": "Comparing Photosynthesis and Respiration",
+          "content": "TITLE: A Comparative Analysis of Photosynthesis and Cellular Respiration\n\nADVANCED CONTENT:\nPhotosynthesis and cellular respiration are fundamental processes that drive the energy flow within living organisms. Photosynthesis, a complex biochemical pathway, involves the conversion of light energy into chemical energy in the form of glucose, while cellular respiration breaks down glucose to release energy for cellular activities.\n\nIn photosynthesis, light energy is absorbed by chlorophyll and converted into chemical energy through a series of reactions, including the Calvin Cycle and the light-dependent reactions. On the other hand, cellular respiration occurs in the mitochondria and involves processes such as glycolysis, the Krebs cycle, and oxidative phosphorylation to produce ATP.\n\nTo deepen our understanding, let's delve into the intricate mechanisms of photosynthesis, exploring the role of photosystems, electron transport chains, and carbon fixation pathways like the C3, C4, and CAM cycles. By examining the differences and efficiencies of these pathways, we can gain insights into how plants adapt to varying environmental conditions.\n\nCritical Thinking Question: How do the structural and functional differences between photosynthesis and cellular respiration reflect the interconnectedness of biological systems in maintaining energy balance within ecosystems?\n\nResearch Challenge: Investigate recent advancements in bioengineering techniques aimed at enhancing photosynthetic efficiency in crops to address food security challenges. Explore interdisciplinary connections with genetic engineering, nanotechnology, and systems biology to optimize plant productivity in changing climates.\n\nBy exploring these complex concepts and interdisciplinary connections, we can appreciate the intricate balance of energy transformations that sustain life on Earth and drive innovation in sustainable agriculture and renewable energy technologies.",
+          "order": 4,
+          "slideType": "ACTIVITY",
+          "bloom_level": "APPLY",
+          "objective": "Analyze and differentiate between photosynthesis and cellular respiration",
+          "speakerNotes": "EXTENSION Level: Advanced content with critical thinking challenges for gifted learners. Emphasizes higher-order skills.",
+          "imageQuery": null,
+          "imageUrl": null,
+          "visualMetadata": null
+        },
+        {
+          "title": "Analyzing Photosynthesis Efficiency",
+          "content": "ADVANCED TITLE: Investigating the Efficiency of Photosynthetic Pathways\n\nEXTENSION CONTENT:\nPhotosynthesis, the complex biological process by which plants convert light energy into chemical energy, involves intricate biochemical mechanisms that vary across different photosynthetic pathways. Explore the nuances of photosynthesis efficiency by delving into the C3, C4, and CAM pathways, each exhibiting unique adaptations to environmental conditions.\n\nCritical Question: How do the structural and functional differences among C3, C4, and CAM photosynthetic pathways contribute to their respective efficiencies in capturing and utilizing light energy?\n\nResearch Challenge: Conduct an in-depth investigation into the molecular mechanisms underlying the enhanced efficiency of C4 plants in hot and arid climates. Consider the implications of these adaptations in the context of climate change and sustainable agriculture practices.\n\nInterdisciplinary Connection: Explore the intersection of biology and environmental science by analyzing how advancements in photosynthesis research can inform strategies for enhancing crop productivity and mitigating the impacts of global climate change.",
+          "order": 5,
+          "slideType": "ACTIVITY",
+          "bloom_level": "ANALYZE",
+          "objective": "Analyze factors affecting the efficiency of photosynthesis",
+          "speakerNotes": "EXTENSION Level: Advanced content with critical thinking challenges for gifted learners. Emphasizes higher-order skills.",
+          "imageQuery": null,
+          "imageUrl": null,
+          "visualMetadata": null
+        },
+        {
+          "title": "Critical Thinking: Photosynthesis Adaptations",
+          "content": "ADVANCED TITLE: Advanced Analysis of Photosynthesis Adaptations\n\nEXTENSION CONTENT:\nPhotosynthesis, the complex biochemical process by which plants convert light energy into chemical energy, involves intricate adaptations to maximize efficiency. Understanding the mechanisms of photosynthesis requires a deep dive into the C3, C4, and CAM pathways, each with distinct strategies for carbon fixation and water usage.\n\nCritical Thinking Question:\nHow do the structural and functional differences between C3, C4, and CAM plants reflect their respective adaptations to varying environmental conditions? Consider the trade-offs each pathway makes in terms of energy efficiency and resource utilization.\n\nResearch Challenge:\nExplore recent studies on genetic modifications of photosynthetic pathways in plants to enhance crop productivity and resilience to climate change. Investigate the potential implications of these engineered adaptations on global food security and sustainability efforts.\n\nInterdisciplinary Connection:\nExamine the intersection of biology and engineering in the development of synthetic biology tools for optimizing photosynthesis in agriculture. Consider how insights from nanotechnology and biophysics can inform innovative approaches to enhancing photosynthetic efficiency in crop plants.",
+          "order": 6,
+          "slideType": "ASSESSMENT",
+          "bloom_level": "ANALYZE",
+          "objective": "Evaluate plant adaptations that enhance photosynthesis efficiency",
+          "speakerNotes": "EXTENSION Level: Advanced content with critical thinking challenges for gifted learners. Emphasizes higher-order skills.",
+          "imageQuery": null,
+          "imageUrl": null,
+          "visualMetadata": null
+        },
+        {
+          "title": "Evaluation of Photosynthesis Importance",
+          "content": "TITLE: Significance Assessment of Photosynthesis in Ecosystem Dynamics\n\nEXTENSION CONTENT:\nPhotosynthesis, the fundamental process by which autotrophic organisms convert light energy into chemical energy, plays a pivotal role in sustaining ecological balance. By synthesizing organic compounds, plants not only serve as primary producers but also contribute to carbon sequestration and oxygen production.\n\nTo delve deeper into the intricacies of photosynthesis, it is imperative to scrutinize the interplay of photosystems I and II, electron transport chains, and the Calvin cycle. Additionally, exploring the phenomenon of photoinhibition and the role of accessory pigments like carotenoids can elucidate the mechanisms underlying photosynthetic efficiency.\n\nCritical Question: How does the regulation of stomatal aperture impact carbon fixation rates in various plant species? Analyze the trade-offs between water loss and CO2 uptake in different photosynthetic strategies.\n\nResearch Challenge: Investigate the potential of utilizing quantum biology principles to enhance photosynthetic efficiency in crop plants. Explore the implications of manipulating photosynthetic pathways for agricultural sustainability and food security.\n\nBy fostering interdisciplinary connections between biology, physics, and environmental science, we can unlock innovative solutions to optimize photosynthetic processes and mitigate the impacts of climate change on global ecosystems.",
+          "order": 7,
+          "slideType": "ASSESSMENT",
+          "bloom_level": "EVALUATE",
+          "objective": "Assess the significance of photosynthesis in the ecosystem",
+          "speakerNotes": "EXTENSION Level: Advanced content with critical thinking challenges for gifted learners. Emphasizes higher-order skills.",
+          "imageQuery": null,
+          "imageUrl": null,
+          "visualMetadata": null
+        },
+        {
+          "title": "Synthesis of Photosynthesis Knowledge",
+          "content": "ADVANCED TITLE: Advanced Exploration of Photosynthetic Processes\n\nEXTENSION CONTENT:\nThe intricate process of photosynthesis involves the conversion of light energy into chemical energy through a series of complex biochemical reactions within specialized structures known as chloroplasts. These reactions are facilitated by a range of enzymes and pigments, such as chlorophyll, which play crucial roles in capturing and transforming light energy into chemical bonds, ultimately producing glucose and oxygen as byproducts.\n\nTo delve deeper into the realm of photosynthesis, one must dissect the nuances of the C3, C4, and CAM pathways, each exhibiting unique adaptations to varying environmental conditions. Analyzing the specific mechanisms and efficiency of these pathways can provide valuable insights into how plants have evolved to thrive in different ecological niches.\n\nCritical Thinking Question:\nIn what ways do the C3, C4, and CAM pathways demonstrate evolutionary strategies for maximizing carbon fixation efficiency in response to environmental challenges? Consider the trade-offs associated with each pathway in terms of resource allocation and metabolic processes.\n\nResearch Challenge:\nExplore the interdisciplinary applications of photosynthesis research by investigating how advancements in synthetic biology and genetic engineering can be leveraged to enhance photosynthetic efficiency in crop plants. Consider the potential implications for sustainable agriculture and global food security in the face of climate change.\n\nBy synthesizing knowledge from biology, chemistry, and environmental science, we can not only deepen our understanding of photosynthesis but also inspire innovative solutions to address pressing challenges in a rapidly changing world.",
+          "order": 8,
+          "slideType": "SUMMARY",
+          "bloom_level": "CREATE",
+          "objective": "Create a visual representation showing the interconnected processes of photosynthesis",
+          "speakerNotes": "EXTENSION Level: Advanced content with critical thinking challenges for gifted learners. Emphasizes higher-order skills.",
+          "imageQuery": null,
+          "imageUrl": null,
+          "visualMetadata": null
+        }
+      ]
+    },
+    "slide_count": 6
+  }
+}
