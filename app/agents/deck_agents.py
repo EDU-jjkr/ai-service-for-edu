@@ -1,5 +1,6 @@
 from typing import List, Dict, Any
 from app.services.openai_service import generate_json_completion, stream_completion
+from app.models.lesson_schema import BloomLevel, SlideType
 import json
 import logging
 import asyncio
@@ -240,17 +241,29 @@ Limit to 3-5 bullet points."""
                 
                 # Generate image query (skip for SUMMARY slides)
                 image_query = None
-                slide_type = slide_plan.get('slideType', slide_plan.get('type', 'CONCEPT'))
+                slide_type_str = slide_plan.get('slideType', slide_plan.get('type', 'CONCEPT'))
+                bloom_level_str = slide_plan.get('bloom_level', 'UNDERSTAND')
                 
-                if slide_type != "SUMMARY":
+                # Convert strings to enums
+                try:
+                    bloom_level_enum = BloomLevel[bloom_level_str] if isinstance(bloom_level_str, str) else bloom_level_str
+                except (KeyError, TypeError):
+                    bloom_level_enum = BloomLevel.UNDERSTAND
+                
+                try:
+                    slide_type_enum = SlideType[slide_type_str] if isinstance(slide_type_str, str) else slide_type_str
+                except (KeyError, TypeError):
+                    slide_type_enum = SlideType.CONCEPT
+                
+                if slide_type_str != "SUMMARY":
                     try:
                         query_result = await VisualDirectorAgent.generate_image_query(
                             slide_content=content,
                             slide_title=slide_plan.get('title', ''),
-                            bloom_level=slide_plan.get('bloom_level', 'UNDERSTAND'),
+                            bloom_level=bloom_level_enum,
                             subject=subject,
                             grade_level=grade_level,
-                            slide_type=slide_type
+                            slide_type=slide_type_enum
                         )
                         image_query = query_result.get('query')
                     except Exception as e:
@@ -260,7 +273,7 @@ Limit to 3-5 bullet points."""
                     "title": slide_plan.get('title', f"Slide {index + 1}"),
                     "content": content,
                     "order": index,
-                    "slideType": slide_type,
+                    "slideType": slide_type_str,
                     "bloom_level": slide_plan.get('bloom_level', 'UNDERSTAND'),
                     "speakerNotes": notes,
                     "imageQuery": image_query,

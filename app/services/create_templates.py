@@ -52,7 +52,7 @@ def create_default_template():
     
     txBox = slide.shapes.add_textbox(left, top, width, height)
     tf = txBox.text_frame
-    tf.text = "Chalkie PowerPoint Template - Default Theme"
+    tf.text = "PowerPoint Template - Default Theme"
     
     p = tf.paragraphs[0]
     p.font.size = Pt(32)

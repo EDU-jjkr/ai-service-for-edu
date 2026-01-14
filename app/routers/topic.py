@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException
-from app.models.schemas import DeckGenerateRequest, DeckGenerateResponse, Slide, VisualMetadata
+from app.models.schemas import DeckGenerateRequest, DeckGenerateResponseLegacy, Slide, VisualMetadata
 from app.models.modify_schemas import DeckModifyRequest
 from app.services.openai_service import generate_json_completion
 from app.services.visual_routing import batch_route_slides
@@ -11,7 +11,7 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-@router.post("/generate-topic", response_model=DeckGenerateResponse)
+@router.post("/generate-topic", response_model=DeckGenerateResponseLegacy)
 async def generate_topic(request: DeckGenerateRequest):
     """Generate a topic outline using AI with smart visual routing and generation"""
     try:
@@ -209,7 +209,7 @@ Generate the complete {request.numSlides}-section topic outline now. Make it eng
         logger.info(f"Topic generation complete: {len(enriched_slides)} sections, "
                    f"{visuals_generated} visuals generated successfully")
 
-        return DeckGenerateResponse(
+        return DeckGenerateResponseLegacy(
             title=result["title"],
             slides=enriched_slides
         )
@@ -219,7 +219,7 @@ Generate the complete {request.numSlides}-section topic outline now. Make it eng
         raise HTTPException(status_code=500, detail=f"Failed to generate topic: {str(e)}")
 
 
-@router.post("/modify-topic", response_model=DeckGenerateResponse)
+@router.post("/modify-topic", response_model=DeckGenerateResponseLegacy)
 async def modify_topic(request: DeckModifyRequest):
     """Modify an existing topic outline based on user feedback"""
     try:
@@ -302,7 +302,7 @@ async def modify_topic(request: DeckModifyRequest):
                 visualMetadata=visual_metadata
             ))
 
-        return DeckGenerateResponse(
+        return DeckGenerateResponseLegacy(
             title=result.get("title", request.currentDeck.get("title")),
             slides=updated_slides
         )

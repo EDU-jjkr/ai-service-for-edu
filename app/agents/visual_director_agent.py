@@ -98,8 +98,8 @@ SLIDE DETAILS:
 - Content: {slide_content[:500]}  
 - Subject: {subject}
 - Grade Level: {grade_level}
-- Bloom's Level: {bloom_level.value}
-- Slide Type: {slide_type.value}
+- Bloom's Level: {getattr(bloom_level, 'value', bloom_level)}
+- Slide Type: {getattr(slide_type, 'value', slide_type)}
 
 Generate the perfect image search query for stock photo APIs."""
 

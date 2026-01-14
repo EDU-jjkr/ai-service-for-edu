@@ -52,7 +52,7 @@ async def test_endpoint(client: httpx.AsyncClient, endpoint: str, payload: Dict[
 
 async def run_e2e_suite():
     print("="*60)
-    print("CHALKIE END-TO-END TEST SUITE")
+    print("END-TO-END TEST SUITE")
     print("="*60)
     
     async with httpx.AsyncClient() as client:
