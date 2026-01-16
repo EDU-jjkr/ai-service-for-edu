@@ -572,7 +572,11 @@ async def generate_complete_deck(request: DeckGenerateRequest):
         StreamingResponse with .pptx file
     """
     try:
+        # DEBUG: Log level information
         logger.info(f"[COMPLETE PIPELINE] Starting for topic: {request.topic or request.topics}")
+        logger.info(f"[DEBUG] Level received: {request.level}, type: {type(request.level)}")
+        if request.level:
+            logger.info(f"[DEBUG] Level value: {request.level.value if hasattr(request.level, 'value') else request.level}")
         
         # Step 1: Generate curriculum-aligned outline with Bloom's progression
         logger.info("[Step 1/4] Generating outline...")
@@ -598,18 +602,45 @@ async def generate_complete_deck(request: DeckGenerateRequest):
         
         # Step 3: Create LessonDeck structure
         logger.info("[Step 3/4] Creating LessonDeck...")
-        from app.models.lesson_schema import LessonDeck, LessonMetadata, LearningStructure, LearningObjective
+        from app.models.lesson_schema import LessonDeck, LessonMetadata, LearningStructure, LearningObjective, Slide, SlideType, BloomLevel
+        
+        # Convert slide dicts to proper Slide objects
+        slide_objects = []
+        for i, slide in enumerate(slides):
+            # Map string to enum, with fallback
+            bloom_str = slide.get('bloom_level', 'UNDERSTAND').upper()
+            try:
+                bloom_level = BloomLevel(bloom_str)
+            except ValueError:
+                bloom_level = BloomLevel.UNDERSTAND
+            
+            slide_type_str = slide.get('slideType', 'CONCEPT').upper()
+            try:
+                slide_type = SlideType(slide_type_str)
+            except ValueError:
+                slide_type = SlideType.CONCEPT
+            
+            slide_obj = Slide(
+                id=str(i + 1),
+                title=slide.get('title', f'Slide {i+1}'),
+                content=slide.get('content', ''),
+                order=slide.get('order', i + 1),
+                slideType=slide_type,
+                bloom_level=bloom_level,
+                speakerNotes=slide.get('speakerNotes', ''),
+                imageQuery=slide.get('imageQuery', None)
+            )
+            slide_objects.append(slide_obj)
         
         # Extract learning objectives from slides
         learning_objectives = []
-        for slide in slides[:3]:  # Take first 3 slides as main objectives
-            if slide.get('objective'):
-                learning_objectives.append(
-                    LearningObjective(
-                        objective=slide['objective'],
-                        bloom_level=slide.get('bloom_level', 'UNDERSTAND')
-                    )
+        for slide in slide_objects[:3]:  # Take first 3 slides as main objectives
+            learning_objectives.append(
+                LearningObjective(
+                    objective=slide.title,
+                    bloom_level=slide.bloom_level
                 )
+            )
         
         lesson_deck = LessonDeck(
             meta=LessonMetadata(
@@ -624,12 +655,79 @@ async def generate_complete_deck(request: DeckGenerateRequest):
                 learning_objectives=learning_objectives,
                 vocabulary=[],
                 prerequisites=[],
-                bloom_progression=[s.get('bloom_level', 'UNDERSTAND') for s in slides]
+                bloom_progression=[s.bloom_level for s in slide_objects]
             ),
-            slides=slides
+            slides=slide_objects
         )
         
-        return lesson_deck
+        # Step 4: Apply differentiation if level is not CORE
+        final_slides = slide_objects  # Start with the proper Slide objects
+        
+        # Get level value (handle both enum and string)
+        level_value = request.level.value if hasattr(request.level, 'value') else str(request.level) if request.level else 'CORE'
+        level_value = level_value.upper()
+        
+        print(f"[DEBUG] Checking differentiation - level_value: {level_value}")
+        logger.info(f"[DEBUG] Checking differentiation - level_value: {level_value}")
+        
+        if level_value != 'CORE':
+            print(f"[Step 4/4] Applying differentiation for level: {level_value}")
+            logger.info(f"[Step 4/4] Applying differentiation for level: {level_value}")
+            try:
+                from app.services.differentiation import DifferentiationService, DifferentiationLevel as DiffLevel
+                diff_service = DifferentiationService()
+                
+                # Map level string to enum
+                level_map = {
+                    'SUPPORT': DiffLevel.SUPPORT,
+                    'EXTENSION': DiffLevel.EXTENSION,
+                }
+                target_level = level_map.get(level_value)
+                print(f"[DEBUG] Target level mapped: {target_level}")
+                
+                if target_level:
+                    print(f"[DEBUG] Calling generate_differentiated_deck with {len(lesson_deck.slides)} slides")
+                    differentiated_deck = await diff_service.generate_differentiated_deck(
+                        core_deck=lesson_deck,
+                        target_level=target_level
+                    )
+                    print(f"[DEBUG] Differentiated deck has {len(differentiated_deck.slides)} slides")
+                    # Extract slides from differentiated deck
+                    final_slides = [
+                        {
+                            "title": slide.title if hasattr(slide, 'title') else slide.get('title', ''),
+                            "content": slide.content if hasattr(slide, 'content') else slide.get('content', ''),
+                            "order": slide.order if hasattr(slide, 'order') else slide.get('order', i+1)
+                        }
+                        for i, slide in enumerate(differentiated_deck.slides)
+                    ]
+                    print(f"✓ Differentiation applied: {len(final_slides)} slides for {level_value}")
+                    logger.info(f"✓ Differentiation applied: {len(final_slides)} slides for {level_value}")
+                else:
+                    logger.warning(f"Unknown level '{level_value}', using core slides")
+            except Exception as diff_error:
+                logger.warning(f"Differentiation failed, returning core: {str(diff_error)}")
+                import traceback
+                logger.error(traceback.format_exc())
+                # Fall back to core slides (use slide_objects, not dict)
+                final_slides = slide_objects
+        else:
+            logger.info("[Step 4/4] Level is CORE, skipping differentiation")
+            final_slides = slide_objects  # Use slide_objects for consistency
+        
+        # Return format expected by backend: simple object with title and slides array
+        level_suffix = f" ({level_value})" if level_value != 'CORE' else ""
+        return {
+            "title": (request.topic or ", ".join(request.topics) if request.topics else "Teaching Deck") + level_suffix,
+            "slides": [
+                {
+                    "title": slide.get("title", "") if isinstance(slide, dict) else slide.title,
+                    "content": slide.get("content", "") if isinstance(slide, dict) else slide.content,
+                    "order": i + 1
+                }
+                for i, slide in enumerate(final_slides)
+            ]
+        }
         
     except Exception as e:
         logger.error(f"[COMPLETE PIPELINE] ❌ Failed: {str(e)}")
