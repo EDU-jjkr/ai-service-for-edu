@@ -265,9 +265,14 @@ Limit to 3-5 bullet points."""
                             grade_level=grade_level,
                             slide_type=slide_type_enum
                         )
-                        image_query = query_result.get('query')
+                        # Fixed: Use 'imageQuery' instead of 'query'
+                        image_query = query_result.get('imageQuery')
+                        logger.debug(f"Image query for slide {index} '{slide_plan.get('title', '')}': {image_query}")
                     except Exception as e:
-                        logger.warning(f"Image query generation failed for slide {index}: {e}")
+                        logger.warning(
+                            f"Image query generation failed for slide {index} "
+                            f"(title: '{slide_plan.get('title', '')}', type: {slide_type_str}): {e}"
+                        )
                 
                 return {
                     "title": slide_plan.get('title', f"Slide {index + 1}"),

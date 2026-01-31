@@ -384,6 +384,16 @@ IMPORTANT:
 
 Generate the complete deck now."""
 
+            # Add teacher's additional instructions if provided
+            if request.additionalInstructions:
+                prompt += f"""
+
+ADDITIONAL TEACHER INSTRUCTIONS:
+{request.additionalInstructions}
+
+Please incorporate these instructions into your deck content.
+"""
+
             logger.info(f"Generating structured {subject_type} deck for {num_topics} topics: {topics_str}")
             
         else:
@@ -942,3 +952,202 @@ async def generate_specific_level(
     except Exception as e:
         logger.error(f"[LEVEL GENERATION] Failed: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Level generation failed: {str(e)}")
+
+
+# ===== ADD ACTIVITY ENDPOINT =====
+
+from pydantic import BaseModel
+from typing import Optional
+
+class AddActivityRequest(BaseModel):
+    """Request to generate an activity slide"""
+    slideContext: dict  # title, content of the preceding slide
+    activityType: str   # mcq, short-answer, long-answer, fill-in-blank
+    customPrompt: Optional[str] = None  # Optional custom instructions
+    subject: str
+    gradeLevel: str
+    topic: str
+
+class AddActivityResponse(BaseModel):
+    """Response with generated activity content"""
+    title: str
+    content: str
+    bloom_level: str
+
+
+@router.post("/add-activity", response_model=AddActivityResponse)
+async def add_activity(request: AddActivityRequest):
+    """
+    Generate an activity (question) slide based on the context of a preceding slide.
+    
+    Activity types:
+    - mcq: Multiple choice question with 4 options
+    - short-answer: Short answer question (1-2 sentences)
+    - long-answer: Long answer question (paragraph response)
+    - fill-in-blank: Fill in the blank question
+    """
+    try:
+        logger.info(f"[ADD ACTIVITY] Generating {request.activityType} activity for topic: {request.topic}")
+        
+        # Map activity type to prompt instructions
+        activity_instructions = {
+            'mcq': '''Generate a multiple-choice question with:
+- A clear, grade-appropriate question
+- 4 options labeled A, B, C, D
+- The correct answer indicated
+- Brief explanation of why the answer is correct''',
+            'short-answer': '''Generate a short-answer question that:
+- Tests understanding of the key concept
+- Can be answered in 1-2 sentences
+- Include the expected answer''',
+            'long-answer': '''Generate a long-answer question that:
+- Requires deeper analysis or explanation
+- Encourages critical thinking
+- Include key points expected in the answer''',
+            'fill-in-blank': '''Generate a fill-in-the-blank question that:
+- Has 1-2 blanks for key terms
+- Tests recall of important vocabulary or concepts
+- Include the correct answers for each blank'''
+        }
+        
+        activity_instruction = activity_instructions.get(
+            request.activityType, 
+            activity_instructions['mcq']
+        )
+        
+        system_message = f"""You are an expert educator creating assessment activities for {request.gradeLevel} students studying {request.subject}.
+Generate engaging, pedagogically sound activities that align with Bloom's Taxonomy.
+Always return a valid JSON object with: title, content, bloom_level (one of: REMEMBER, UNDERSTAND, APPLY, ANALYZE, EVALUATE, CREATE)."""
+        
+        prompt = f"""Create an activity based on this slide content:
+
+TOPIC: {request.topic}
+SLIDE TITLE: {request.slideContext.get('title', '')}
+SLIDE CONTENT: {request.slideContext.get('content', '')}
+
+ACTIVITY TYPE: {request.activityType}
+
+{activity_instruction}
+
+{f'ADDITIONAL INSTRUCTIONS: {request.customPrompt}' if request.customPrompt else ''}
+
+Return JSON:
+{{
+    "title": "Activity title (descriptive, engaging)",
+    "content": "The complete activity content formatted cleanly",
+    "bloom_level": "The cognitive level this activity targets"
+}}"""
+        
+        result = await generate_json_completion(
+            prompt=prompt,
+            system_message=system_message,
+            max_tokens=1000,
+            temperature=0.7
+        )
+        
+        logger.info(f"✓ Activity generated: {result.get('title', 'Unknown')}")
+        
+        return AddActivityResponse(
+            title=result.get('title', f'{request.activityType.upper()} Activity'),
+            content=result.get('content', ''),
+            bloom_level=result.get('bloom_level', 'APPLY')
+        )
+        
+    except Exception as e:
+        logger.error(f"[ADD ACTIVITY] Failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Activity generation failed: {str(e)}")
+
+
+# ===== ADD SLIDE ENDPOINT =====
+
+class AddSlideRequest(BaseModel):
+    """Request to generate a new slide"""
+    description: str    # Teacher's description of what they want
+    slideType: str      # CONCEPT, ACTIVITY, ASSESSMENT, SUMMARY
+    subject: str
+    gradeLevel: str
+    topic: str
+
+class AddSlideResponse(BaseModel):
+    """Response with generated slide content"""
+    title: str
+    content: str
+    bloom_level: str
+
+
+@router.post("/add-slide", response_model=AddSlideResponse)
+async def add_slide(request: AddSlideRequest):
+    """
+    Generate a new slide based on teacher's description.
+    
+    Slide types:
+    - CONCEPT: Explanatory content teaching a concept
+    - ACTIVITY: Interactive activity or practice
+    - ASSESSMENT: Quiz or assessment questions
+    - SUMMARY: Recap or summary of key points
+    """
+    try:
+        logger.info(f"[ADD SLIDE] Generating {request.slideType} slide for topic: {request.topic}")
+        
+        # Map slide type to Bloom's level suggestions
+        type_bloom_map = {
+            'CONCEPT': 'UNDERSTAND',
+            'ACTIVITY': 'APPLY',
+            'ASSESSMENT': 'ANALYZE',
+            'SUMMARY': 'REMEMBER'
+        }
+        
+        suggested_bloom = type_bloom_map.get(request.slideType, 'UNDERSTAND')
+        
+        system_message = f"""You are an expert instructional designer creating educational slides for {request.gradeLevel} students studying {request.subject}.
+Create engaging, educationally sound content that:
+- Is age-appropriate for {request.gradeLevel}
+- Uses clear, simple language
+- Includes concrete examples when helpful
+- Follows best practices for visual learning
+
+Always return a valid JSON object with: title, content, bloom_level."""
+        
+        prompt = f"""Create a {request.slideType} slide for this lesson:
+
+TOPIC: {request.topic}
+SUBJECT: {request.subject}
+GRADE LEVEL: {request.gradeLevel}
+
+TEACHER'S REQUEST:
+{request.description}
+
+SLIDE TYPE: {request.slideType}
+SUGGESTED BLOOM LEVEL: {suggested_bloom}
+
+Guidelines for {request.slideType} slides:
+- CONCEPT: Clear explanation with examples, bullet points for key ideas
+- ACTIVITY: Interactive task or practice exercise
+- ASSESSMENT: Questions to check understanding
+- SUMMARY: Key takeaways and recap
+
+Return JSON:
+{{
+    "title": "Slide title (clear, concise, engaging)",
+    "content": "Slide content formatted as bullet points where appropriate",
+    "bloom_level": "The cognitive level this slide targets"
+}}"""
+        
+        result = await generate_json_completion(
+            prompt=prompt,
+            system_message=system_message,
+            max_tokens=1000,
+            temperature=0.7
+        )
+        
+        logger.info(f"✓ Slide generated: {result.get('title', 'Unknown')}")
+        
+        return AddSlideResponse(
+            title=result.get('title', 'New Slide'),
+            content=result.get('content', ''),
+            bloom_level=result.get('bloom_level', suggested_bloom)
+        )
+        
+    except Exception as e:
+        logger.error(f"[ADD SLIDE] Failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Slide generation failed: {str(e)}")

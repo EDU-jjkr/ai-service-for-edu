@@ -106,3 +106,25 @@ class CurriculumPlanResponse(BaseModel):
     totalPeriods: int
     chapters: List[ChapterPlan]
 
+
+# Quiz Generator Schemas
+class QuizQuestion(BaseModel):
+    content: str
+    type: str  # 'multiple-choice', 'true-false', 'short-answer'
+    options: Optional[List[str]] = None
+    answer: str
+    explanation: Optional[str] = None
+    difficulty: Optional[str] = "medium"
+
+class QuizGenerateRequest(BaseModel):
+    classLevel: str
+    subject: str
+    chapter: str
+    topic: str
+    count: Optional[int] = 5
+    additionalInstructions: Optional[str] = None  # Custom instructions from teacher
+
+class QuizGenerateResponse(BaseModel):
+    questions: List[QuizQuestion]
+
+

@@ -35,7 +35,8 @@ class StockPhotoService:
     async def fetch_image(
         self, 
         query: str, 
-        orientation: str = "landscape"
+        orientation: str = "landscape",
+        subject: str = ""
     ) -> Tuple[Optional[BytesIO], Optional[str]]:
         """
         Fetch image with fallback strategy.
@@ -43,10 +44,11 @@ class StockPhotoService:
         Args:
             query: Search query (e.g., "sun shining on ocean")
             orientation: "landscape" or "portrait"
+            subject: Subject area for placeholder theming
             
         Returns:
             Tuple of (image_stream, attribution_text)
-            Returns (None, None) if no image found
+            Returns placeholder image if stock photos fail
         """
         if not query:
             logger.warning("Empty query provided to fetch_image")
@@ -66,9 +68,31 @@ class StockPhotoService:
             logger.info(f"✓ Pexels image fetched for: '{query}'")
             return image_data
         
-        # No results found
-        logger.warning(f"✗ No stock photos found for query: '{query}'")
-        return None, None
+        # Final fallback: Generate placeholder image
+        logger.warning(f"Stock photos failed for '{query}', generating placeholder")
+        try:
+            from app.services.placeholder_generator import generate_placeholder_image
+            
+            # Determine dimensions based on orientation
+            if orientation == "portrait":
+                width, height = 1080, 1920
+            else:
+                width, height = 1920, 1080
+            
+            placeholder = generate_placeholder_image(
+                image_query=query,
+                width=width,
+                height=height,
+                subject=subject
+            )
+            
+            attribution = f"Placeholder: {query}"
+            logger.info(f"✓ Placeholder generated for: '{query}'")
+            return placeholder, attribution
+            
+        except Exception as e:
+            logger.error(f"Placeholder generation also failed: {e}")
+            return None, None
     
     async def _fetch_from_unsplash(
         self, 

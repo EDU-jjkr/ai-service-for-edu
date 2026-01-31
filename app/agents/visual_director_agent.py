@@ -11,6 +11,38 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def smart_truncate(text: str, max_length: int = 500) -> str:
+    """
+    Truncate text intelligently at sentence or word boundaries.
+    
+    Args:
+        text: Text to truncate
+        max_length: Maximum character length
+        
+    Returns:
+        Truncated text that doesn't cut mid-sentence or mid-word
+    """
+    if len(text) <= max_length:
+        return text
+    
+    # Try to find a sentence boundary (., !, ?) before max_length
+    truncated = text[:max_length]
+    
+    # Look for sentence endings in reverse
+    for delimiter in ['. ', '! ', '? ', '.\n', '!\n', '?\n']:
+        last_sentence = truncated.rfind(delimiter)
+        if last_sentence > max_length * 0.5:  # At least 50% of max_length
+            return text[:last_sentence + 1].strip()
+    
+    # If no sentence boundary found, try word boundary
+    last_space = truncated.rfind(' ')
+    if last_space > max_length * 0.5:
+        return text[:last_space].strip() + '...'
+    
+    # Fallback: hard truncate with ellipsis
+    return text[:max_length].strip() + '...'
+
+
 class VisualDirectorAgent:
     """
     Specialized agent for generating image search queries based on slide content.
@@ -54,54 +86,37 @@ class VisualDirectorAgent:
             return {
                 "imageQuery": None,
                 "orientation": "landscape",
-                "keywords": [],
-                "imageType": "none",
-                "confidence": 0,
-                "reasoning": "Summary slides typically don't need images"
+                "imageType": "none"
             }
         
         system_message = """You are a Visual Content Director for educational materials.
 
-Your job is to analyze slide content and create the PERFECT search query for stock photo APIs (Unsplash, Pexels).
+Generate concise image search queries for stock photo APIs (Unsplash, Pexels).
 
-CRITICAL RULES:
-1. Queries must be 3-8 words maximum
-2. Use simple, descriptive language
-3. Focus on CONCRETE, PHOTOGRAPHABLE subjects (not abstract concepts)
-4. Avoid text-heavy images (stock photos are better than diagrams with text)
-5. Consider age-appropriateness for the grade level
-6. Prefer nature, real-world examples, and clear visuals
+RULES:
+1. Keep queries 3-8 words, simple and descriptive
+2. Focus on CONCRETE, PHOTOGRAPHABLE subjects
+3. Prefer real-world examples and clear visuals
+4. Consider age-appropriateness
 
-ORIENTATION GUIDELINES:
-- "landscape" for most content slides (16:9 ratio)
-- "portrait" for people-focused or vertical subjects
-
-IMAGE TYPE GUIDELINES:
-- "stock_photo" for real-world subjects (90% of cases)
-- "diagram" for process flows, cycles (e.g., water cycle diagram)
-- "illustration" for abstract concepts that can't be photographed
-
-Return JSON format:
+Return STRICT JSON (no trailing commas, no commentary):
 {
   "imageQuery": "concise search query",
   "orientation": "landscape",
-  "keywords": ["tag1", "tag2", "tag3"],
-  "imageType": "stock_photo",
-  "confidence": 85,
-  "reasoning": "Brief explanation of choice"
-}"""
+  "imageType": "stock_photo"
+}
 
-        prompt = f"""Analyze this educational slide and generate the optimal image search query:
+orientation: "landscape" (default) or "portrait"
+imageType: "stock_photo", "diagram", or "illustration" """
 
-SLIDE DETAILS:
-- Title: {slide_title}
-- Content: {slide_content[:500]}  
-- Subject: {subject}
-- Grade Level: {grade_level}
-- Bloom's Level: {getattr(bloom_level, 'value', bloom_level)}
-- Slide Type: {getattr(slide_type, 'value', slide_type)}
+        prompt = f"""Generate an image search query for this slide:
 
-Generate the perfect image search query for stock photo APIs."""
+Title: {slide_title}
+Content: {smart_truncate(slide_content, 500)}
+Subject: {subject}
+Grade: {grade_level}
+Bloom Level: {bloom_level.value}
+Slide Type: {slide_type.value}"""
 
         try:
             result = await generate_json_completion(
@@ -111,39 +126,50 @@ Generate the perfect image search query for stock photo APIs."""
                 temperature=0.7
             )
             
-            # Validate and set defaults
-            query = result.get("imageQuery", "")
+            # Log raw result for debugging
+            logger.debug(f"Visual Director raw result for '{slide_title}': {result}")
             
-            # If query is empty or None, return low confidence
+            # Validate required keys
+            query = result.get("imageQuery")
+            
             if not query:
-                logger.warning(f"No image query generated for slide: {slide_title}")
+                logger.warning(
+                    f"No imageQuery in result for slide '{slide_title}' (type: {slide_type.value}). "
+                    f"Raw result keys: {list(result.keys())}"
+                )
                 return {
                     "imageQuery": None,
                     "orientation": "landscape",
-                    "keywords": [],
-                    "imageType": "none",
-                    "confidence": 0,
-                    "reasoning": "No suitable image found for this content"
+                    "imageType": "none"
                 }
+            
+            # Success - log for monitoring
+            logger.info(f"✓ Image query for '{slide_title}': \"{query}\"")
             
             return {
                 "imageQuery": query,
                 "orientation": result.get("orientation", "landscape"),
-                "keywords": result.get("keywords", []),
-                "imageType": result.get("imageType", "stock_photo"),
-                "confidence": result.get("confidence", 75),
-                "reasoning": result.get("reasoning", "Generated from slide content")
+                "imageType": result.get("imageType", "stock_photo")
             }
             
-        except Exception as e:
-            logger.error(f"Visual Director failed for slide '{slide_title}': {e}")
+        except KeyError as e:
+            logger.error(
+                f"Missing key in Visual Director result for '{slide_title}': {e}. "
+                f"Raw result: {result if 'result' in locals() else 'N/A'}"
+            )
             return {
                 "imageQuery": None,
                 "orientation": "landscape",
-                "keywords": [],
-                "imageType": "none",
-                "confidence": 0,
-                "reasoning": f"Error: {str(e)}"
+                "imageType": "none"
+            }
+        except Exception as e:
+            logger.error(
+                f"Visual Director failed for slide '{slide_title}' (type: {slide_type.value}): {type(e).__name__}: {e}"
+            )
+            return {
+                "imageQuery": None,
+                "orientation": "landscape",
+                "imageType": "none"
             }
     
     @staticmethod

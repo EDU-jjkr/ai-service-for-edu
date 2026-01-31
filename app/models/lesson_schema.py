@@ -130,6 +130,7 @@ class DeckGenerateRequest(BaseModel):
     standards: List[str] = []  # Specific curriculum standards to align with
     pedagogical_model: Optional[PedagogicalModel] = PedagogicalModel.I_DO_WE_DO_YOU_DO
     level: Optional[DifferentiationLevel] = DifferentiationLevel.CORE
+    additionalInstructions: Optional[str] = None  # Custom instructions from teacher
 
 
 class DeckGenerateResponse(BaseModel):

@@ -298,6 +298,7 @@ async def generate_curriculum_plan(request_data: dict):
         grade_level = request_data.get("gradeLevel", "")
         subject = request_data.get("subject", "")
         chapters = request_data.get("chapters", [])  # Full curriculum data from backend
+        additional_instructions = request_data.get("additionalInstructions", "")  # Teacher's custom instructions
         
         if not grade_level or not subject:
             raise HTTPException(status_code=400, detail="gradeLevel and subject are required")
@@ -395,6 +396,16 @@ QUALITY STANDARDS:
 - Total hours should reflect a typical academic year allocation
 
 Generate the complete curriculum plan now."""
+
+        # Add teacher's additional instructions if provided
+        if additional_instructions:
+            prompt += f"""
+
+ADDITIONAL TEACHER INSTRUCTIONS:
+{additional_instructions}
+
+Please incorporate these instructions into your curriculum plan.
+"""
 
         result = await generate_json_completion(
             prompt=prompt,

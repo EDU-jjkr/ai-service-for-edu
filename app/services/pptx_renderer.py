@@ -125,7 +125,7 @@ class PPTXRenderer:
         
         # Fetch and insert image if imageQuery exists
         if slide_data.imageQuery:
-            await self._insert_image_from_query(slide, slide_data.imageQuery, slide_data.title)
+            await self._insert_image_from_query(slide, slide_data.imageQuery, slide_data.title, subject)
         
         logger.info(f"✓ Slide created: {slide_data.title}")
     
@@ -207,7 +207,7 @@ class PPTXRenderer:
         else:
             slide.notes_slide.notes_text_frame.text += f"\n\n{notes}"
     
-    async def _insert_image_from_query(self, slide, image_query: str, slide_title: str):
+    async def _insert_image_from_query(self, slide, image_query: str, slide_title: str, subject: str = ""):
         """
         Fetch image from stock photo API and insert into slide.
         
@@ -215,14 +215,16 @@ class PPTXRenderer:
             slide: Slide object
             image_query: Search query for stock photos
             slide_title: Title of slide (for logging)
+            subject: Subject area for placeholder theming
         """
         try:
             logger.info(f"Fetching image for: {image_query}")
             
-            # Fetch image from stock photo service
+            # Fetch image from stock photo service (with placeholder fallback)
             image_stream, attribution = await self.stock_photo_service.fetch_image(
                 query=image_query,
-                orientation="landscape"
+                orientation="landscape",
+                subject=subject
             )
             
             if not image_stream:
