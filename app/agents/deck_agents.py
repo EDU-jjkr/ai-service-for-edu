@@ -182,30 +182,98 @@ class ContentAgent:
         Stream the content for a single slide.
         Yields chunks of the generated content string.
         """
-        system_message = f"""You are a teacher for Grade {grade_level} {subject}.
-Write the content for a presentation slide.
-Keep it concise, bulleted, and engaging.
+        # Check if this is a science/physics subject that needs detailed explanations
+        is_science = any(kw in subject.lower() for kw in ['physics', 'chemistry', 'science', 'biology'])
+        
+        system_message = f"""You are an expert teacher for Grade {grade_level} {subject}.
+Write COMPREHENSIVE teaching content for a presentation slide.
+This content will be used to actually TEACH students, so be thorough.
 Do not include markdown for bolding (**), just plain text.
+
+CONTENT REQUIREMENTS:
+{"For physics/science topics, include:" if is_science else "Include:"}
+• Clear conceptual explanations with real-world analogies
+• Mathematical formulas with explanation of each variable/term
+• Step-by-step derivations where applicable
+• Physical significance and intuition behind equations
+• Historical context and who discovered/proposed it
+• Common misconceptions and how to avoid them
+• Visual descriptions (describe diagrams that would help)
+
+SPECIAL INSTRUCTION FOR EQUATIONS:
+When presenting equations like Schrödinger Equation, wave functions, etc:
+• Write the full equation clearly
+• Explain what each symbol represents
+• Explain the physical meaning in simple terms
+• Give both time-dependent and time-independent forms if applicable
+• Explain boundary conditions and constraints
 
 SPECIAL INSTRUCTION FOR PRACTICE QUESTIONS:
 If the slide type is ACTIVITY or ASSESSMENT, structure your content as:
-• Question: [Clear question statement]
+• Question: [Clear question statement with context]
 • Options: A) [...] B) [...] C) [...] D) [...] (if multiple choice)
 • Answer: [Correct answer]
-• Explanation: [Brief explanation of why this is correct]
+• Detailed Explanation: [Step-by-step explanation of the solution]
+• Common Mistakes: [What students typically get wrong]
 
-For non-question slides, use standard bullet points."""
+For non-question slides, provide comprehensive bullet points with explanations."""
 
         slide_type = slide_outline.get('slideType', slide_outline.get('type', 'CONCEPT'))
+        bloom_level = slide_outline.get('bloom_level', 'UNDERSTAND')
         
-        prompt = f"""Write content for this slide:
+        # Determine content depth based on slide type
+        if slide_type == 'INTRODUCTION':
+            content_guidance = """
+Provide:
+• Hook/engaging opening (interesting fact or question)
+• Clear definition of the main concept
+• Historical background (when, who, why)
+• Why this topic matters/real-world relevance
+• Overview of what will be covered
+• Prerequisites the student should know"""
+        elif slide_type == 'CONCEPT':
+            content_guidance = """
+Provide:
+• Detailed explanation of the concept
+• Mathematical formulation with full breakdown
+• Physical meaning and intuition
+• Real-world examples and applications
+• Common misconceptions to address
+• Connection to previously learned concepts
+• Visual/diagram description for better understanding"""
+        elif slide_type in ['ACTIVITY', 'ASSESSMENT']:
+            content_guidance = """
+Provide:
+• Clear problem statement with all given information
+• Step-by-step solution approach
+• Complete worked solution
+• Final answer clearly stated
+• Explanation of key insights
+• Tips for similar problems"""
+        elif slide_type == 'SUMMARY':
+            content_guidance = """
+Provide:
+• Key concepts covered (comprehensive list)
+• Important equations to remember
+• Key takeaways and insights
+• How this connects to other topics
+• Suggested further reading/exploration
+• Quick revision points"""
+        else:
+            content_guidance = "Provide comprehensive content with 6-8 detailed points."
+        
+        prompt = f"""Write DETAILED teaching content for this slide:
 Title: {slide_outline['title']}
 Type: {slide_type}
+Bloom's Level: {bloom_level}
 Objective: {slide_outline['objective']}
 
-Limit to 3-5 bullet points."""
+{content_guidance}
 
-        async for chunk in stream_completion(prompt, system_message, max_tokens=300):
+Remember: This content will be used to TEACH students. Be thorough, clear, and educational.
+Include enough detail that a teacher can use this to deliver a complete lesson on the topic."""
+
+        async for chunk in stream_completion(prompt, system_message, max_tokens=800):
             yield chunk
     
     @staticmethod

@@ -156,24 +156,33 @@ async def generate_deck(request: DeckGenerateRequest):
             
             # === QUANTITATIVE SUBJECTS (Math, Physics, Chemistry) ===
             if subject_type == 'quantitative':
-                system_message = """You are an expert educational content designer specializing in creating structured teaching decks.
-            
-Your decks follow a precise pedagogical structure for each topic:
-1. Definition - Clear, concise definition of the concept
-2. Details & Explanation - In-depth explanation with examples
-3. Basic Question - Simple question to check understanding
-4. Numerical/Hard Question - Challenging problem requiring application
-5. Olympiad Question - Extremely difficult, competition-level problem
+                # Calculate total slides: 8 per topic + 1 summary for physics-heavy topics
+                total_slides = num_topics * 8 + 1
+                
+                system_message = """You are an expert educational content designer specializing in creating COMPREHENSIVE teaching decks for physics, chemistry, and mathematics.
+
+Your decks follow a precise pedagogical structure for each topic that ensures deep understanding:
+
+FOR COMPLEX PHYSICS CONCEPTS (like Schrödinger Equation, Wave Functions, Quantum Mechanics, etc.):
+1. Introduction & Historical Context - Who discovered it, when, why it was needed
+2. Definition & Key Concepts - Clear mathematical statement with explanation
+3. Mathematical Derivation - Step-by-step derivation if applicable
+4. Physical Interpretation - What the equation/concept actually means physically
+5. Applications & Examples - Real-world applications and worked examples
+6. Basic Question - Simple question to check understanding
+7. Numerical/Hard Question - Challenging problem requiring application
+8. Olympiad Question - Competition-level problem
 
 You create content that is:
 - Age-appropriate for the specified grade level
 - Accurate and aligned with curriculum standards
-- Engaging and thought-provoking
+- COMPREHENSIVE enough for actual classroom teaching
+- Engaging with real-world connections
 - Properly formatted for presentation
 
 Always respond with valid JSON."""
 
-                prompt = f"""Generate a structured teaching deck for the following:
+                prompt = f"""Generate a COMPREHENSIVE teaching deck for the following:
 
 SPECIFICATIONS:
 - Subject: {request.subject}
@@ -185,74 +194,117 @@ SPECIFICATIONS:
 
 STRICT STRUCTURE (follow this EXACTLY for EACH topic):
 
-For each topic, create exactly 5 slides in this order:
+For each topic, create exactly 8 slides in this order:
 
-**Slide Type 1: DEFINITION**
-- Title: "[Topic Name]: Definition"
-- Content: Clear, textbook-quality definition. Include key terms in bold.
-- Keep it concise: 2-3 sentences maximum.
+**Slide Type 1: INTRODUCTION & HISTORICAL CONTEXT**
+- Title: "Introduction to [Topic Name]"
+- Content MUST include:
+  • When was this concept/equation proposed and by whom
+  • What problem was it trying to solve
+  • Historical significance in the development of the field
+  • How it changed our understanding of the subject
+  • Why students should care about this topic
+  • Prerequisites they should know
+- Make it engaging with interesting historical facts.
 
-**Slide Type 2: DETAILS & EXPLANATION**  
-- Title: "Understanding [Topic Name]"
-- Content: Detailed explanation with:
-  • Key concepts and principles
-  • Real-world examples
-  • Important formulas (if applicable)
-  • Visual descriptions [mention what diagrams would help]
-- Use bullet points, 4-6 points.
+**Slide Type 2: DEFINITION & KEY CONCEPTS**
+- Title: "[Topic Name]: Definition & Key Concepts"
+- Content MUST include:
+  • The complete mathematical statement/equation (if applicable)
+  • Clear definition of EVERY symbol and term used
+  • Key terminology students need to know
+  • Different forms of the equation if applicable (e.g., time-dependent vs time-independent Schrödinger Equation)
+  • What assumptions are made
+- Be precise and complete.
 
-**Slide Type 3: BASIC QUESTION (Easy)**
+**Slide Type 3: MATHEMATICAL DERIVATION (if applicable)**
+- Title: "Deriving [Topic Name]"
+- Content MUST include:
+  • Starting point (what equations/principles we begin with)
+  • Step-by-step derivation with explanations
+  • Key mathematical insights at each step
+  • Final form of the equation
+  • What this derivation tells us about the physics
+- If no derivation exists, replace with "Mathematical Framework" explaining how to work with the equations.
+
+**Slide Type 4: PHYSICAL INTERPRETATION**
+- Title: "Understanding the Physics of [Topic Name]"
+- Content MUST include:
+  • What does this equation/concept actually MEAN physically?
+  • Intuitive explanations using analogies
+  • What does each term represent in real life?
+  • Common misconceptions and how to avoid them
+  • Visual descriptions (what diagrams would help)
+  • Connections to everyday phenomena
+- Make the abstract concrete.
+
+**Slide Type 5: APPLICATIONS & EXAMPLES**
+- Title: "[Topic Name]: Applications"
+- Content MUST include:
+  • At least 3 real-world applications
+  • Worked example with step-by-step solution
+  • How this concept is used in technology/research
+  • Connections to other topics in the curriculum
+  • Career fields that use this knowledge
+- Be specific with real examples.
+
+**Slide Type 6: BASIC QUESTION (Easy)**
 - Title: "[Topic Name]: Practice Question 1"
 - Content: Simple question testing basic understanding.
-  • State the question clearly
+  • State the question clearly with all given information
   • For MCQ, provide 4 options (A, B, C, D)
-  • Include "Answer: [correct answer]" at the end
-  • Brief explanation of why that's correct
+  • Include "Answer: [correct answer]" 
+  • Include detailed explanation of WHY that's correct
 
 📊 EASY DIFFICULTY BOUNDARIES:
 - Solution steps: 1-3 steps MAXIMUM
 - Completion time: Under 5 minutes
-- Prior knowledge: None needed - question is self-contained
+- Prior knowledge: Should be answerable from this lesson alone
 - Cognitive load: Single basic concept only
 
-**Slide Type 4: NUMERICAL/HARD QUESTION (Medium)**
+**Slide Type 7: NUMERICAL/HARD QUESTION (Medium)**
 - Title: "[Topic Name]: Practice Question 2 (Challenging)"
 - Content: Numerical problem or complex application question.
-  • Multi-step problem requiring understanding
-  • Show the problem setup clearly
-  • Include "Solution:" with step-by-step working
-  • Include "Answer: [final answer]"
+  • Multi-step problem requiring real understanding
+  • Show the problem setup clearly with all given values
+  • Include "Solution:" with step-by-step working showing ALL steps
+  • Include "Answer: [final answer with units]"
+  • Tip for similar problems
 
 📊 MEDIUM DIFFICULTY BOUNDARIES:
 - Solution steps: 4-7 steps required
 - Completion time: 10-20 minutes
-- Prior knowledge: Assumes familiarity with basic domain concepts
+- Prior knowledge: Assumes mastery of this topic's basics
 - Cognitive load: Combines 2-3 related concepts
 
-**Slide Type 5: OLYMPIAD QUESTION (Very Difficult/Hard)**
+**Slide Type 8: OLYMPIAD QUESTION (Very Difficult/Hard)**
 - Title: "[Topic Name]: Challenge Question (Olympiad Level)"
 - Content: Extremely challenging problem.
   • Competition-style question (JEE/NEET/Olympiad level)
   • May combine multiple concepts across topics
-  • Include "Approach:" with hints
+  • Include "Approach:" with hints on how to think about it
   • Include "Solution:" with detailed working
   • Include "Answer: [final answer]"
+  • Insights about problem-solving strategies
 
 📊 HARD DIFFICULTY BOUNDARIES:
 - Solution steps: 8+ steps required
 - Completion time: 30+ minutes
-- Prior knowledge: Deep understanding required, synthesize multiple advanced concepts
-- Cognitive load: Creative problem-solving, novel approaches needed
+- Prior knowledge: Deep understanding required
+- Cognitive load: Creative problem-solving needed
 - Target: Only top 5% students should solve independently
 
-**FINAL SLIDE: SUMMARY**
+**FINAL SLIDE: COMPREHENSIVE SUMMARY**
 After all topics are covered, create ONE summary slide:
 - Title: "Today's Learning Summary"
-- Content: Bullet points covering:
-  • Each topic we covered
-  • Key formulas/concepts to remember
-  • 2-3 key takeaways
-- No new content, just consolidation.
+- Content: Comprehensive bullet points covering:
+  • Key definitions and equations to remember
+  • Physical meanings and interpretations
+  • Important formulas with what each symbol means
+  • Connections between topics covered
+  • Common mistakes to avoid
+  • Key takeaways for exams
+  • Suggested further reading/exploration
 
 
 TOPICS TO COVER (in order):

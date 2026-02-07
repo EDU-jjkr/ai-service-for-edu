@@ -36,27 +36,76 @@ class LessonPlanGenerateRequest(BaseModel):
     topics: List[str]
     subject: str
     gradeLevel: str
-    totalDuration: int
+    classDuration: int = 45  # Duration per class period in minutes
+    # AI will determine number of sessions based on topic count and complexity
+
 
 class LessonStep(BaseModel):
     order: int
     activity: str
     duration: int
-    method: str
+    method: str  # "I Do", "We Do", "You Do", "Discussion", etc.
     resources: List[str]
+    notes: Optional[str] = None
+
 
 class Concept(BaseModel):
     id: str
     name: str
     description: str
 
+
+class SessionIntroduction(BaseModel):
+    """Introduction/Hook section for each session"""
+    hook: str  # Engaging opening activity to capture interest
+    priorKnowledge: str  # How to activate prior knowledge
+    agendaShare: str  # What to tell students about today's lesson
+
+
+class CheckForUnderstanding(BaseModel):
+    """Formative assessment during the lesson"""
+    type: str  # "questioning", "quick_quiz", "whiteboard", "verbal_summary", etc.
+    prompt: str
+    expectedResponse: Optional[str] = None
+
+
+class LessonSession(BaseModel):
+    """Single class session within a multi-session lesson plan"""
+    sessionNumber: int
+    title: str
+    duration: int  # In minutes
+    objectives: List[str]  # SWBAT objectives for this session
+    introduction: SessionIntroduction
+    activities: List[LessonStep]
+    checkForUnderstanding: List[CheckForUnderstanding]
+    closure: str  # Summary and preview of next session
+
+
+class AssessmentPlan(BaseModel):
+    """Overall assessment strategy for the lesson"""
+    formative: List[str]  # Ongoing checks during lessons
+    summative: str  # End assessment or project
+
+
+class DifferentiationPlan(BaseModel):
+    """Strategies for diverse learners"""
+    support: List[str]  # For struggling learners
+    extension: List[str]  # For advanced learners
+    accommodations: Optional[List[str]] = None  # For IEP/ELL students
+
+
 class LessonPlanGenerateResponse(BaseModel):
     title: str
-    objectives: List[str]
+    objectives: List[str]  # Master objectives for entire unit
+    prerequisites: List[str]  # What students should already know
+    standards: Optional[List[str]] = None  # Curriculum standards alignment
     concepts: List[Concept]
-    sequence: List[LessonStep]
-    assessments: List[str]
+    sessions: List[LessonSession]  # Multiple class sessions
+    assessments: AssessmentPlan
     resources: List[str]
+    differentiation: DifferentiationPlan
+    totalSessions: int
+    totalDuration: int  # Total minutes across all sessions
 
 class DoubtRequest(BaseModel):
     question: str

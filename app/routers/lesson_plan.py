@@ -3,12 +3,17 @@ from app.models.schemas import (
     LessonPlanGenerateRequest,
     LessonPlanGenerateResponse,
     LessonStep,
-    LessonStep,
-    Concept
+    Concept,
+    SessionIntroduction,
+    CheckForUnderstanding,
+    LessonSession,
+    AssessmentPlan,
+    DifferentiationPlan
 )
 from app.models.modify_schemas import LessonPlanModifyRequest
 from app.services.openai_service import generate_json_completion
 import logging
+import math
 
 logger = logging.getLogger(__name__)
 
@@ -16,225 +21,322 @@ router = APIRouter()
 
 @router.post("/generate-lesson-plan", response_model=LessonPlanGenerateResponse)
 async def generate_lesson_plan(request: LessonPlanGenerateRequest):
-    """Generate a complete lesson plan using AI"""
+    """Generate a complete multi-session lesson plan using AI"""
     try:
         # DEFENSIVE: Ensure all topics are strings and filter out empty ones
         topics_list = [str(topic) for topic in request.topics if topic]
         topics_str = ", ".join(topics_list)
         num_topics = len(topics_list)
         
-        # Calculate time allocations using research-based lesson structure
-        warmup_time = max(5, int(request.totalDuration * 0.10))  # 10% for engagement
-        main_time = int(request.totalDuration * 0.70)  # 70% for core instruction
-        closure_time = max(5, int(request.totalDuration * 0.15))  # 15% for closure
-        assessment_time = request.totalDuration - warmup_time - main_time - closure_time
+        # Calculate number of sessions based on topic count
+        # Rule: ~1-2 topics per session for thorough coverage
+        class_duration = request.classDuration
+        num_sessions = max(1, math.ceil(num_topics / 1.5))  # Avg 1.5 topics per session
+        total_duration = num_sessions * class_duration  # Calculate total based on sessions
+        
+        # Calculate time allocations per session using research-based lesson structure
+        intro_time = max(5, int(class_duration * 0.12))  # 12% for hook/intro
+        main_time = int(class_duration * 0.65)  # 65% for core instruction (I Do, We Do, You Do)
+        assessment_time = max(3, int(class_duration * 0.10))  # 10% for formative checks
+        closure_time = max(5, int(class_duration * 0.13))  # 13% for closure
         
         system_message = """You are a master educator and curriculum specialist with expertise in backward design, differentiated instruction, and evidence-based teaching practices. You have deep knowledge of learning standards, cognitive science, and classroom management.
 
 Your lesson plans are known for:
 - Clear alignment between objectives, activities, and assessments
-- Strategic scaffolding that builds student understanding
-- Differentiation strategies for diverse learners
-- Practical, classroom-tested activities and transitions
-- Efficient use of instructional time
-- Formative assessment opportunities throughout
-- Resources that are realistic and accessible
+- Strategic scaffolding using "I Do, We Do, You Do" methodology
+- Engaging hooks that capture student interest and activate prior knowledge
+- Differentiation strategies for diverse learners (struggling, advanced, IEP/ELL)
+- Practical, classroom-tested activities with smooth transitions
+- Efficient use of instructional time with realistic pacing
+- Formative assessment opportunities woven throughout
+- Clear closure activities that synthesize learning
 
 You design lessons that are immediately implementable by any qualified teacher, with enough detail to ensure quality instruction while allowing for teacher autonomy and adaptation.
 
 Always respond with valid, comprehensive JSON that follows professional lesson planning standards."""
 
-        prompt = f"""Design a complete, professional-grade lesson plan using backward design principles.
+        prompt = f"""Design a complete, professional-grade MULTI-SESSION lesson plan using backward design principles.
 
 LESSON SPECIFICATIONS:
 - Topics to Cover: {topics_str}
 - Subject Area: {request.subject}
 - Grade Level: {request.gradeLevel}
-- Total Duration: {request.totalDuration} minutes
-- Number of Topics: {num_topics}
+- Class Period Duration: {class_duration} minutes per session
+- Number of Sessions Needed: {num_sessions} (based on {num_topics} topics to cover thoroughly)
+- Total Teaching Time: {total_duration} minutes
 
-BACKWARD DESIGN FRAMEWORK:
+===== STAGE 1: DESIRED RESULTS (What should students learn?) =====
 
-STAGE 1: DESIRED RESULTS (What should students learn?)
-Create 3-5 SMART learning objectives that:
-- Start with measurable action verbs (Bloom's Taxonomy: analyze, evaluate, create, apply, etc.)
-- Are specific to the topics: {topics_str}
-- Are achievable within {request.totalDuration} minutes
+MASTER OBJECTIVES (for the entire unit):
+Create 3-5 SMART learning objectives using the SWBAT (Students Will Be Able To) format:
+- Start with measurable action verbs (Bloom's Taxonomy: analyze, evaluate, create, apply, compare, etc.)
+- Specific to topics: {topics_str}
+- Achievable within {num_sessions} class sessions
 - Target appropriate cognitive level for {request.gradeLevel}
-- Connect to broader learning standards when relevant
 
-Example format: "Students will be able to [action verb] [specific content] [context/criteria]"
+PREREQUISITES:
+List 2-4 things students should already know before starting this lesson.
 
-STAGE 2: ASSESSMENT EVIDENCE (How will we know they learned?)
-Design multiple assessment strategies:
-- Formative assessments (2-3): Quick checks during lesson (exit tickets, questioning, observation)
-- Summative assessment (1): End-of-lesson or follow-up assessment
-- Include specific success criteria or rubric elements
-- Make assessments directly measure the objectives
+===== STAGE 2: ASSESSMENT EVIDENCE (How will we know they learned?) =====
 
-STAGE 3: LEARNING PLAN (How will we teach it?)
+FORMATIVE ASSESSMENTS (ongoing):
+- Design 2-3 quick checks to use DURING instruction
+- Examples: exit tickets, thumbs up/down, whiteboard responses, pair-share explains
 
-A. CONCEPT MAPPING:
-Identify {num_topics * 2}-{num_topics * 3} key concepts across topics:
-- Each concept needs: unique ID, clear name, concise description (1-2 sentences)
-- Order concepts from foundational to advanced
-- Connect concepts logically (prerequisites and dependencies)
-- Include both content knowledge and skills
+SUMMATIVE ASSESSMENT (end):
+- One comprehensive end-of-lesson/unit assessment
+- Could be: quiz, project, presentation, written response
 
-B. INSTRUCTIONAL SEQUENCE:
-Design {max(5, num_topics + 3)}-{max(8, num_topics + 5)} instructional activities following this structure:
+===== STAGE 3: LEARNING PLAN (How will we teach it?) =====
 
-**Phase 1: ENGAGE & ACTIVATE (≈{warmup_time} min)**
-- Opening activity that hooks students and activates prior knowledge
-- Method: Quick discussion, KWL chart, provocative question, demonstration, etc.
-- Clear learning intentions shared with students
+CONCEPT MAPPING:
+Identify {max(3, num_topics * 2)} key concepts across topics:
+- Each concept: unique ID, name, 1-2 sentence description
+- Order from foundational to advanced
 
-**Phase 2: EXPLORE & EXPLAIN (≈{main_time} min total)**
-- Break into {num_topics * 2}-{num_topics * 3} strategic activities covering all topics
-- Include mix of teaching methods:
-  * Direct instruction (mini-lectures, modeling, demonstrations)
-  * Guided practice (scaffolded work with teacher support)
-  * Collaborative learning (pair work, group activities)
-  * Independent application
-- Each activity should:
-  * Have specific duration (ensure all durations sum to {request.totalDuration})
-  * List concrete resources needed
-  * Specify clear teaching method
-  * Include transition notes if helpful
-  * Address specific concept(s) from your concept map
+SESSION STRUCTURE (design {num_sessions} complete sessions):
 
-**Phase 3: ELABORATE & APPLY (within main instruction)**
-- Include at least one activity where students apply learning to new context
-- Could be problem-solving, case study, creative application, or analysis
+For EACH of the {num_sessions} sessions, create:
 
-**Phase 4: EVALUATE & CLOSE (≈{closure_time + assessment_time} min)**
-- Formative assessment activity
-- Closure activity that synthesizes learning
-- Preview of next lesson or homework
+**A. SESSION OBJECTIVES (2-3 per session)**
+- Specific SWBAT statements for just that session
+- Should build toward master objectives
 
-DIFFERENTIATION CONSIDERATIONS:
-- Include at least one strategy for supporting struggling learners
-- Include at least one extension for advanced learners
-- Consider multiple entry points and learning modalities
+**B. INTRODUCTION/HOOK (≈{intro_time} minutes)**
+Design an engaging opener with:
+- "hook": A thought-provoking question, short demo, video clip, surprising fact, or quick poll that captures attention
+- "priorKnowledge": How you'll activate what students already know (KWL, quick discussion, review question)
+- "agendaShare": Brief statement sharing today's learning target with students
 
-RESOURCE REQUIREMENTS:
-List 5-10 specific, realistic resources:
-- Required materials (handouts, manipulatives, supplies)
-- Technology needs (specific apps, websites, equipment)
-- Reference materials (textbooks, articles, videos - be specific)
-- Preparation items (pre-cut materials, pre-written prompts)
+**C. LEARNING ACTIVITIES (≈{main_time} minutes total)**
+Use the "I Do, We Do, You Do" structure:
 
-OUTPUT FORMAT (return as JSON):
+1. "I Do" (Teacher models): 
+   - Direct instruction, demonstration, think-aloud
+   - Teacher shows exactly how to do the skill/concept
+   
+2. "We Do" (Guided practice):
+   - Students practice WITH teacher support
+   - Pair work, whole-class problem-solving, guided examples
+   
+3. "You Do" (Independent practice):
+   - Students work independently to demonstrate understanding
+   - Can include collaborative work with minimal teacher help
+
+Each activity must have:
+- order (1, 2, 3...)
+- activity (detailed description of what happens)
+- duration (in minutes - MUST sum to session duration)
+- method ("I Do", "We Do", "You Do", "Discussion", "Demonstration", etc.)
+- resources (specific materials needed)
+- notes (optional: key questions to ask, common mistakes to address)
+
+**D. CHECK FOR UNDERSTANDING (≈{assessment_time} minutes)**
+During and after activities, include 2-3 formative checks:
+- type: "questioning", "quick_quiz", "whiteboard", "verbal_summary", "exit_ticket", etc.
+- prompt: The specific question or task
+- expectedResponse: What a successful response looks like (optional)
+
+**E. CLOSURE (≈{closure_time} minutes)**
+Synthesize learning:
+- Quick summary of key points
+- Connection to next session or real-world application
+- Preview what's coming next (if not final session)
+
+===== DIFFERENTIATION STRATEGIES =====
+
+SUPPORT (for struggling learners):
+- 2-3 specific strategies (simplified materials, extra scaffolding, peer tutoring)
+
+EXTENSION (for advanced learners):
+- 2-3 challenge activities (deeper questions, additional complexity, independent research)
+
+ACCOMMODATIONS (for IEP/ELL students, optional):
+- Visual aids, modified assignments, extra time, etc.
+
+===== OUTPUT FORMAT (return as JSON) =====
 {{
     "title": "Engaging, specific lesson title that captures the learning goal",
     "objectives": [
-        "Students will be able to [specific, measurable objective 1 using action verb]",
-        "Students will be able to [specific, measurable objective 2]",
-        "Include 3-5 SMART objectives total"
+        "Students will be able to [master objective 1]",
+        "Students will be able to [master objective 2]",
+        "Students will be able to [master objective 3]"
     ],
+    "prerequisites": [
+        "Understanding of [prior concept 1]",
+        "Ability to [prior skill]"
+    ],
+    "standards": ["Optional curriculum standard alignment"],
     "concepts": [
         {{
             "id": "concept-1",
             "name": "First Key Concept",
-            "description": "Clear 1-2 sentence explanation of this concept and why it matters"
-        }},
-        {{
-            "id": "concept-2",
-            "name": "Second Key Concept",
-            "description": "Description connecting to previous concepts where relevant"
+            "description": "Clear explanation of this concept"
         }}
-        // Include {num_topics * 2}-{num_topics * 3} concepts total
     ],
-    "sequence": [
+    "sessions": [
         {{
-            "order": 1,
-            "activity": "Engaging Hook: [Specific activity name and description]",
-            "duration": {warmup_time},
-            "method": "Discussion/Question prompt/Demonstration",
-            "resources": ["Specific resource needed", "Another resource"],
-            "notes": "[Optional: Transition tips, differentiation notes, key questions to ask]"
-        }},
-        {{
-            "order": 2,
-            "activity": "Direct Instruction: [Specific content - what exactly will be taught]",
-            "duration": 15,
-            "method": "Mini-lecture with visual aids",
-            "resources": ["Presentation slides on [topic]", "Diagram/chart showing [concept]"],
-            "concepts": ["concept-1", "concept-2"],
-            "notes": "Check for understanding: Ask students to [specific check]"
+            "sessionNumber": 1,
+            "title": "Session 1: [Focus of this session]",
+            "duration": {class_duration},
+            "objectives": [
+                "SWBAT [session-specific objective 1]",
+                "SWBAT [session-specific objective 2]"
+            ],
+            "introduction": {{
+                "hook": "Start with a surprising question: [specific question or activity]",
+                "priorKnowledge": "Ask students to recall [specific prior knowledge activation]",
+                "agendaShare": "Today we will learn to [learning target in student-friendly language]"
+            }},
+            "activities": [
+                {{
+                    "order": 1,
+                    "activity": "I Do: Teacher demonstrates [specific skill/concept]",
+                    "duration": 10,
+                    "method": "I Do",
+                    "resources": ["Whiteboard", "Example problems"],
+                    "notes": "Key point to emphasize: [important note]"
+                }},
+                {{
+                    "order": 2,
+                    "activity": "We Do: Work through [specific practice] together",
+                    "duration": 15,
+                    "method": "We Do",
+                    "resources": ["Student handout", "Guided practice worksheet"],
+                    "notes": "Common mistake: [what to watch for]"
+                }},
+                {{
+                    "order": 3,
+                    "activity": "You Do: Students independently [specific task]",
+                    "duration": 12,
+                    "method": "You Do",
+                    "resources": ["Independent practice sheet"],
+                    "notes": "Circulate and provide individual feedback"
+                }}
+            ],
+            "checkForUnderstanding": [
+                {{
+                    "type": "questioning",
+                    "prompt": "Can someone explain [concept] in their own words?",
+                    "expectedResponse": "Students should mention [key elements]"
+                }},
+                {{
+                    "type": "whiteboard",
+                    "prompt": "Solve this quick problem: [example]",
+                    "expectedResponse": "Correct answer is [X]"
+                }}
+            ],
+            "closure": "Today we learned [summary]. Tomorrow we will build on this by [preview]."
         }}
-        // Continue with {max(5, num_topics + 3)}-{max(8, num_topics + 5)} total activities
-        // Ensure durations sum to exactly {request.totalDuration} minutes
-        // Final activity should be closure/assessment
     ],
-    "assessments": [
-        "Formative: [Specific strategy - what will you do and what will you look for?]",
-        "Formative: [Another ongoing check during lesson]",
-        "Summative: [End assessment - specific task/assignment with success criteria]"
-    ],
+    "assessments": {{
+        "formative": [
+            "Quick check: [specific formative assessment strategy]",
+            "Exit ticket: [specific question or prompt]"
+        ],
+        "summative": "End-of-unit quiz covering [topics] with [format description]"
+    }},
     "resources": [
-        "[Specific resource 1 with details - not generic]",
-        "[Specific resource 2 - include source if relevant]",
+        "Specific resource 1 (with source if relevant)",
+        "Specific resource 2",
         "Include 5-10 concrete, obtainable resources"
     ],
     "differentiation": {{
-        "support": "Strategy for struggling learners: [specific approach]",
-        "extension": "Challenge for advanced learners: [specific approach]"
-    }}
+        "support": [
+            "Provide graphic organizer for [concept]",
+            "Pair struggling students with peer tutors"
+        ],
+        "extension": [
+            "Challenge: Have students create their own [advanced task]",
+            "Research: Explore [deeper topic]"
+        ],
+        "accommodations": [
+            "Visual aids for ELL students",
+            "Extended time for written responses"
+        ]
+    }},
+    "totalSessions": {num_sessions},
+    "totalDuration": {total_duration}
 }}
 
-QUALITY STANDARDS:
-- All activities must explicitly connect to stated objectives
-- Total duration of all sequence activities must equal {request.totalDuration} minutes
-- Assessment methods must directly measure the objectives
-- Include specific examples, not vague placeholders
-- Resources must be realistic and specific (not "materials as needed")
-- Transitions between activities should be logical and smooth
-- Balance teacher-led and student-centered activities
-- Include at least 3 different teaching methods
-- Concepts should cover all topics: {topics_str}
-- Everything should be appropriate for {request.gradeLevel} students
+===== QUALITY STANDARDS =====
+✓ Each session's activity durations MUST sum to exactly {class_duration} minutes
+✓ All activities connect to stated objectives
+✓ Include at least one "I Do", "We Do", and "You Do" per session
+✓ Formative checks are specific and actionable
+✓ Resources are realistic and accessible
+✓ Transitions between activities are logical
+✓ Appropriate for {request.gradeLevel} students
+✓ Covers all topics: {topics_str}
 
-COHERENCE CHECK:
-✓ Do objectives align with topics: {topics_str}?
-✓ Do activities teach toward the objectives?
-✓ Do assessments measure the objectives?
-✓ Do concepts cover all necessary content?
-✓ Does sequence flow logically and use time wisely?
-✓ Are methods varied and age-appropriate?
-
-Generate the complete lesson plan now. Make it detailed, professional, and immediately usable for classroom instruction."""
+Generate the complete {num_sessions}-session lesson plan now. Make it detailed, professional, and immediately usable for classroom instruction."""
 
         result = await generate_json_completion(
             prompt=prompt,
             system_message=system_message,
-            max_tokens=3500,  # Increased for comprehensive plans
-            temperature=0.6   # Slightly lower for more structured output
+            max_tokens=4000,  # Max supported by model
+            temperature=0.6
         )
 
         # Transform and validate response
-        concepts = [Concept(**c) for c in result["concepts"]]
-        sequence = [LessonStep(**s) for s in result["sequence"]]
+        concepts = [Concept(**c) for c in result.get("concepts", [])]
         
-        # Validate timing adds up
-        total_sequence_time = sum(step.duration for step in sequence)
-        if abs(total_sequence_time - request.totalDuration) > 5:  # Allow 5 min variance
-            print(f"Warning: Sequence duration ({total_sequence_time}) doesn't match requested ({request.totalDuration})")
+        sessions = []
+        for s in result.get("sessions", []):
+            intro = SessionIntroduction(**s.get("introduction", {}))
+            activities = [LessonStep(**a) for a in s.get("activities", [])]
+            checks = [CheckForUnderstanding(**c) for c in s.get("checkForUnderstanding", [])]
+            
+            session = LessonSession(
+                sessionNumber=s.get("sessionNumber", 1),
+                title=s.get("title", f"Session {s.get('sessionNumber', 1)}"),
+                duration=s.get("duration", class_duration),
+                objectives=s.get("objectives", []),
+                introduction=intro,
+                activities=activities,
+                checkForUnderstanding=checks,
+                closure=s.get("closure", "")
+            )
+            sessions.append(session)
+        
+        # Validate timing for each session
+        for session in sessions:
+            session_time = sum(step.duration for step in session.activities)
+            if abs(session_time - session.duration) > 10:  # Allow 10 min variance
+                logger.warning(f"Session {session.sessionNumber} duration mismatch: activities={session_time}, expected={session.duration}")
 
-        # Extract differentiation if present
-        differentiation = result.get("differentiation", {})
+        # Build assessment plan
+        assessments_data = result.get("assessments", {})
+        assessments = AssessmentPlan(
+            formative=assessments_data.get("formative", []),
+            summative=assessments_data.get("summative", "End-of-lesson assessment")
+        )
+        
+        # Build differentiation plan
+        diff_data = result.get("differentiation", {})
+        differentiation = DifferentiationPlan(
+            support=diff_data.get("support", []),
+            extension=diff_data.get("extension", []),
+            accommodations=diff_data.get("accommodations")
+        )
         
         return LessonPlanGenerateResponse(
-            title=result["title"],
-            objectives=result["objectives"],
+            title=result.get("title", "Lesson Plan"),
+            objectives=result.get("objectives", []),
+            prerequisites=result.get("prerequisites", []),
+            standards=result.get("standards"),
             concepts=concepts,
-            sequence=sequence,
-            assessments=result["assessments"],
-            resources=result["resources"],
-            differentiation=differentiation if differentiation else None
+            sessions=sessions,
+            assessments=assessments,
+            resources=result.get("resources", []),
+            differentiation=differentiation,
+            totalSessions=len(sessions),
+            totalDuration=sum(s.duration for s in sessions)
         )
 
     except Exception as e:
+        logger.error(f"Lesson plan generation failed: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to generate lesson plan: {str(e)}")
 
 @router.post("/modify-lesson-plan", response_model=LessonPlanGenerateResponse)
@@ -244,11 +346,12 @@ async def modify_lesson_plan(request: LessonPlanModifyRequest):
         import json
         current_plan_json = json.dumps(request.currentPlan, indent=2)
         
-        system_message = """You are an expert curriculum specialist revising a lesson plan.
+        system_message = """You are an expert curriculum specialist revising a multi-session lesson plan.
         Apply the user's feedback to the provided JSON lesson plan. 
-        Maintain the strict JSON structure. Return the FULL updated plan."""
+        Maintain the strict JSON structure with sessions, activities, checkForUnderstanding, etc.
+        Return the FULL updated plan with all sessions."""
 
-        prompt = f"""REVISE THIS LESSON PLAN.
+        prompt = f"""REVISE THIS MULTI-SESSION LESSON PLAN.
 
         CONTEXT:
         Subject: {request.subject}
@@ -260,30 +363,65 @@ async def modify_lesson_plan(request: LessonPlanModifyRequest):
         CURRENT PLAN JSON:
         {current_plan_json}
 
-        OUTPUT FORMAT: Valid JSON matching the original schema (objectives, concepts, sequence, etc.).
+        OUTPUT FORMAT: Valid JSON matching the original schema with sessions, differentiation, assessments, etc.
+        Preserve the multi-session structure.
         """
 
         result = await generate_json_completion(
             prompt=prompt,
             system_message=system_message,
-            max_tokens=3500,
+            max_tokens=4000,
             temperature=0.6
         )
 
         # Transform and validate response
         concepts = [Concept(**c) for c in result.get("concepts", [])]
-        sequence = [LessonStep(**s) for s in result.get("sequence", [])]
         
-        differentiation = result.get("differentiation", {})
+        sessions = []
+        for s in result.get("sessions", []):
+            intro = SessionIntroduction(**s.get("introduction", {}))
+            activities = [LessonStep(**a) for a in s.get("activities", [])]
+            checks = [CheckForUnderstanding(**c) for c in s.get("checkForUnderstanding", [])]
+            
+            session = LessonSession(
+                sessionNumber=s.get("sessionNumber", 1),
+                title=s.get("title", f"Session {s.get('sessionNumber', 1)}"),
+                duration=s.get("duration", 45),
+                objectives=s.get("objectives", []),
+                introduction=intro,
+                activities=activities,
+                checkForUnderstanding=checks,
+                closure=s.get("closure", "")
+            )
+            sessions.append(session)
+
+        # Build assessment plan
+        assessments_data = result.get("assessments", {})
+        assessments = AssessmentPlan(
+            formative=assessments_data.get("formative", []),
+            summative=assessments_data.get("summative", "End-of-lesson assessment")
+        )
+        
+        # Build differentiation plan
+        diff_data = result.get("differentiation", {})
+        differentiation = DifferentiationPlan(
+            support=diff_data.get("support", []),
+            extension=diff_data.get("extension", []),
+            accommodations=diff_data.get("accommodations")
+        )
 
         return LessonPlanGenerateResponse(
             title=result.get("title", "Updated Lesson Plan"),
             objectives=result.get("objectives", []),
+            prerequisites=result.get("prerequisites", []),
+            standards=result.get("standards"),
             concepts=concepts,
-            sequence=sequence,
-            assessments=result.get("assessments", []),
+            sessions=sessions,
+            assessments=assessments,
             resources=result.get("resources", []),
-            differentiation=differentiation if differentiation else None
+            differentiation=differentiation,
+            totalSessions=len(sessions),
+            totalDuration=sum(s.duration for s in sessions)
         )
 
     except Exception as e:
