@@ -1,9 +1,10 @@
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
-from app.models.schemas import DeckGenerateRequest, DeckGenerateResponse, Slide, VisualMetadata
+from app.models.schemas import DeckGenerateRequest, DeckGenerateResponse, Slide, VisualMetadata, PPTXRenderRequest
 from app.models.modify_schemas import DeckModifyRequest
-from app.models.lesson_schema import LessonDeck, LessonMetadata, LearningStructure, LearningObjective, BloomLevel
+from app.models.lesson_schema import LessonDeck, LessonMetadata, LearningStructure, LearningObjective, BloomLevel, SlideType
 from app.services.openai_service import generate_json_completion
+from app.services.prompt_policy import concise_output_policy, deck_question_policy
 from app.services.visual_routing import batch_route_slides
 from app.services.visual_generator import batch_generate_visuals
 from app.services.pptx_renderer import PPTXRenderer
@@ -33,6 +34,108 @@ def classify_subject(subject: str) -> str:
     is_quantitative = any(keyword in subject_lower for keyword in quantitative_keywords)
     
     return 'quantitative' if is_quantitative else 'descriptive'
+
+
+def _enum_value(enum_cls, value, default):
+    if isinstance(value, enum_cls):
+        return value
+    if isinstance(value, str):
+        try:
+            return enum_cls[value.upper()]
+        except KeyError:
+            try:
+                return enum_cls(value.upper())
+            except ValueError:
+                return default
+    return default
+
+
+def _build_response(lesson_deck: LessonDeck, title: str | None = None) -> DeckGenerateResponse:
+    response_title = title or lesson_deck.meta.topic
+    return DeckGenerateResponse(
+        lesson=lesson_deck,
+        title=response_title,
+        meta=lesson_deck.meta.model_dump(mode="json"),
+        structure=lesson_deck.structure.model_dump(mode="json"),
+        slides=lesson_deck.slides,
+    )
+
+
+def _lesson_from_payload(
+    slides_data,
+    topic: str,
+    subject: str,
+    grade_level: str,
+    theme: str = "default",
+    meta: dict | None = None,
+    structure: dict | None = None,
+    fallback_slides: list[Slide] | None = None,
+) -> LessonDeck:
+    slide_objects = []
+
+    for i, slide in enumerate(slides_data):
+        fallback_slide = fallback_slides[i] if fallback_slides and i < len(fallback_slides) else None
+        slide_obj = Slide(
+            title=slide.get("title") or (fallback_slide.title if fallback_slide else f"Slide {i+1}"),
+            content=slide.get("content") or (fallback_slide.content if fallback_slide else ""),
+            order=slide.get("order", i + 1),
+            slideType=_enum_value(
+                SlideType,
+                slide.get("slideType") or slide.get("type") or (fallback_slide.slideType.value if fallback_slide else None),
+                fallback_slide.slideType if fallback_slide else SlideType.CONCEPT,
+            ),
+            bloom_level=_enum_value(
+                BloomLevel,
+                slide.get("bloom_level") or (fallback_slide.bloom_level.value if fallback_slide else None),
+                fallback_slide.bloom_level if fallback_slide else BloomLevel.UNDERSTAND,
+            ),
+            objective=slide.get("objective") or (fallback_slide.objective if fallback_slide else None),
+            speakerNotes=slide.get("speakerNotes") or slide.get("speaker_notes") or (fallback_slide.speakerNotes if fallback_slide else None),
+            imageQuery=slide.get("imageQuery") or slide.get("image_query") or (fallback_slide.imageQuery if fallback_slide else None),
+            visualMetadata=(
+                VisualMetadata(**slide["visualMetadata"])
+                if slide.get("visualMetadata")
+                else (fallback_slide.visualMetadata if fallback_slide else None)
+            ),
+        )
+        slide_objects.append(slide_obj)
+
+    lesson_meta = LessonMetadata(
+        topic=meta.get("topic", topic) if meta else topic,
+        grade=meta.get("grade", grade_level) if meta else grade_level,
+        subject=meta.get("subject", subject) if meta else subject,
+        standards=meta.get("standards", []) if meta else [],
+        theme=meta.get("theme", theme) if meta else theme,
+        pedagogical_model=meta.get("pedagogical_model", "I_DO_WE_DO_YOU_DO") if meta else "I_DO_WE_DO_YOU_DO",
+    )
+    lesson_structure = LearningStructure(
+        learning_objectives=[
+            LearningObjective(
+                objective=obj.get("objective", ""),
+                bloom_level=_enum_value(BloomLevel, obj.get("bloom_level"), BloomLevel.UNDERSTAND),
+            )
+            for obj in (structure.get("learning_objectives", []) if structure else [])
+            if obj.get("objective")
+        ],
+        vocabulary=structure.get("vocabulary", []) if structure else [],
+        prerequisites=structure.get("prerequisites", []) if structure else [],
+        bloom_progression=[
+            _enum_value(BloomLevel, level, BloomLevel.UNDERSTAND)
+            for level in (structure.get("bloom_progression", []) if structure else [])
+        ] if structure else [slide.bloom_level for slide in slide_objects],
+    )
+
+    if not lesson_structure.learning_objectives:
+        lesson_structure.learning_objectives = [
+            LearningObjective(objective=slide.objective or slide.title, bloom_level=slide.bloom_level)
+            for slide in slide_objects[:3]
+        ]
+
+    return LessonDeck(
+        meta=lesson_meta,
+        structure=lesson_structure,
+        slides=slide_objects,
+    )
 
 # ... (generate_deck function stays here, simplified for brevity in this replace block if not editing it) ...
 
@@ -119,10 +222,14 @@ async def modify_deck(request: DeckModifyRequest):
                 visualMetadata=visual_metadata
             ))
 
-        return DeckGenerateResponse(
-            title=result.get("title", request.currentDeck.get("title")),
-            slides=updated_slides
+        lesson_deck = _lesson_from_payload(
+            slides_data=result.get("slides", []),
+            topic=result.get("title") or request.currentDeck.get("title") or "Modified Deck",
+            subject=request.subject,
+            grade_level=request.gradeLevel,
+            fallback_slides=updated_slides,
         )
+        return _build_response(lesson_deck, title=result.get("title", request.currentDeck.get("title")))
 
     except Exception as e:
         logger.error(f"Deck modification failed: {str(e)}")
@@ -159,30 +266,16 @@ async def generate_deck(request: DeckGenerateRequest):
                 # Calculate total slides: 8 per topic + 1 summary for physics-heavy topics
                 total_slides = num_topics * 8 + 1
                 
-                system_message = """You are an expert educational content designer specializing in creating COMPREHENSIVE teaching decks for physics, chemistry, and mathematics.
+                system_message = f"""You are an expert educational content designer specializing in curriculum-aligned teaching decks for physics, chemistry, and mathematics.
 
-Your decks follow a precise pedagogical structure for each topic that ensures deep understanding:
+Use measurable instructional constraints instead of vague adjectives.
+{deck_question_policy()}
 
-FOR COMPLEX PHYSICS CONCEPTS (like Schrödinger Equation, Wave Functions, Quantum Mechanics, etc.):
-1. Introduction & Historical Context - Who discovered it, when, why it was needed
-2. Definition & Key Concepts - Clear mathematical statement with explanation
-3. Mathematical Derivation - Step-by-step derivation if applicable
-4. Physical Interpretation - What the equation/concept actually means physically
-5. Applications & Examples - Real-world applications and worked examples
-6. Basic Question - Simple question to check understanding
-7. Numerical/Hard Question - Challenging problem requiring application
-8. Olympiad Question - Competition-level problem
-
-You create content that is:
-- Age-appropriate for the specified grade level
-- Accurate and aligned with curriculum standards
-- COMPREHENSIVE enough for actual classroom teaching
-- Engaging with real-world connections
-- Properly formatted for presentation
+{concise_output_policy(max_bullets=6, max_sentences=2)}
 
 Always respond with valid JSON."""
 
-                prompt = f"""Generate a COMPREHENSIVE teaching deck for the following:
+                prompt = f"""Generate a structured teaching deck for the following:
 
 SPECIFICATIONS:
 - Subject: {request.subject}
@@ -213,7 +306,7 @@ For each topic, create exactly 8 slides in this order:
   • The complete mathematical statement/equation (if applicable)
   • Clear definition of EVERY symbol and term used
   • Key terminology students need to know
-  • Different forms of the equation if applicable (e.g., time-dependent vs time-independent Schrödinger Equation)
+  • Different forms of the equation if applicable
   • What assumptions are made
 - Be precise and complete.
 
@@ -236,7 +329,7 @@ For each topic, create exactly 8 slides in this order:
   • Common misconceptions and how to avoid them
   • Visual descriptions (what diagrams would help)
   • Connections to everyday phenomena
-- Make the abstract concrete.
+- Keep the explanation concrete and classroom-ready.
 
 **Slide Type 5: APPLICATIONS & EXAMPLES**
 - Title: "[Topic Name]: Applications"
@@ -248,38 +341,41 @@ For each topic, create exactly 8 slides in this order:
   • Career fields that use this knowledge
 - Be specific with real examples.
 
-**Slide Type 6: BASIC QUESTION (Easy)**
+**Slide Type 6: FOUNDATION CHECK**
 - Title: "[Topic Name]: Practice Question 1"
-- Content: Simple question testing basic understanding.
+- Content: Question testing recall, identification, or direct interpretation.
   • State the question clearly with all given information
   • For MCQ, provide 4 options (A, B, C, D)
-  • Include "Answer: [correct answer]" 
-  • Include detailed explanation of WHY that's correct
+  • Include "Answer: [correct answer]"
+  • Include "Explanation:" in 1-3 direct sentences
+  • Keep the task answerable from this lesson alone
 
-📊 EASY DIFFICULTY BOUNDARIES:
-- Solution steps: 1-3 steps MAXIMUM
-- Completion time: Under 5 minutes
-- Prior knowledge: Should be answerable from this lesson alone
-- Cognitive load: Single basic concept only
+FOUNDATION CHECK CONSTRAINTS:
+- UI difficulty label: Easy
+- Bloom-aligned target: Remember, Understand
+- Working time: under 5 minutes
+- Step budget: 1-3 steps maximum
+- Concept span: single core concept
 
-**Slide Type 7: NUMERICAL/HARD QUESTION (Medium)**
-- Title: "[Topic Name]: Practice Question 2 (Challenging)"
-- Content: Numerical problem or complex application question.
+**Slide Type 7: MULTI-STEP APPLICATION**
+- Title: "[Topic Name]: Practice Question 2"
+- Content: Numerical problem or applied reasoning question.
   • Multi-step problem requiring real understanding
   • Show the problem setup clearly with all given values
   • Include "Solution:" with step-by-step working showing ALL steps
   • Include "Answer: [final answer with units]"
-  • Tip for similar problems
+  • Include one transfer tip for similar problems
 
-📊 MEDIUM DIFFICULTY BOUNDARIES:
-- Solution steps: 4-7 steps required
-- Completion time: 10-20 minutes
-- Prior knowledge: Assumes mastery of this topic's basics
-- Cognitive load: Combines 2-3 related concepts
+MULTI-STEP APPLICATION CONSTRAINTS:
+- UI difficulty label: Medium
+- Bloom-aligned target: Apply, Analyze
+- Working time: 10-20 minutes
+- Step budget: 4-7 steps
+- Concept span: 2-3 linked concepts inside one topic
 
-**Slide Type 8: OLYMPIAD QUESTION (Very Difficult/Hard)**
+**Slide Type 8: INTEGRATED CHALLENGE**
 - Title: "[Topic Name]: Challenge Question (Olympiad Level)"
-- Content: Extremely challenging problem.
+- Content: Competition-style or cross-topic transfer problem.
   • Competition-style question (JEE/NEET/Olympiad level)
   • May combine multiple concepts across topics
   • Include "Approach:" with hints on how to think about it
@@ -287,17 +383,17 @@ For each topic, create exactly 8 slides in this order:
   • Include "Answer: [final answer]"
   • Insights about problem-solving strategies
 
-📊 HARD DIFFICULTY BOUNDARIES:
-- Solution steps: 8+ steps required
-- Completion time: 30+ minutes
-- Prior knowledge: Deep understanding required
-- Cognitive load: Creative problem-solving needed
-- Target: Only top 5% students should solve independently
+INTEGRATED CHALLENGE CONSTRAINTS:
+- UI difficulty label: Hard
+- Bloom-aligned target: Evaluate, Synthesize, Create transfer
+- Working time: 30+ minutes
+- Step budget: 8+ steps or multi-constraint reasoning
+- Concept span: cross-topic synthesis or competition-style transfer
 
-**FINAL SLIDE: COMPREHENSIVE SUMMARY**
+**FINAL SLIDE: SUMMARY**
 After all topics are covered, create ONE summary slide:
 - Title: "Today's Learning Summary"
-- Content: Comprehensive bullet points covering:
+- Content: concise bullet points covering:
   • Key definitions and equations to remember
   • Physical meanings and interpretations
   • Important formulas with what each symbol means
@@ -312,20 +408,12 @@ TOPICS TO COVER (in order):
             
             # === DESCRIPTIVE SUBJECTS (English, History, Geography, etc.) ===
             else:
-                system_message = """You are an expert educational content designer specializing in creating structured teaching decks for descriptive subjects.
+                system_message = f"""You are an expert educational content designer specializing in structured teaching decks for descriptive subjects.
 
-Your decks follow a precise pedagogical structure for each topic:
-1. Definition/Key Term - Clear explanation of the concept or term
-2. Explanation with Context - Detailed explanation with historical/literary context
-3. Easy Question - Recall/identification question
-4. Medium Question - Analysis/comparison question
-5. Hard Question - Synthesis/evaluation question
+Use measurable instructional constraints instead of vague adjectives.
+{deck_question_policy()}
 
-You create content that is:
-- Age-appropriate for the specified grade level
-- Historically/contextually accurate
-- Engaging and thought-provoking
-- Properly formatted for presentation
+{concise_output_policy(max_bullets=6, max_sentences=2)}
 
 Always respond with valid JSON."""
 
@@ -359,46 +447,49 @@ For each topic, create exactly 5 slides in this order:
   • Connections to other related concepts
 - Use bullet points, 4-6 points.
 
-**Slide Type 3: EASY QUESTION (Recall/Identification)**
+**Slide Type 3: FOUNDATION CHECK**
 - Title: "[Topic Name]: Practice Question 1"
-- Content: Question testing basic understanding and recall.
+- Content: Question testing direct understanding and recall.
   • "Who was...", "What is...", "When did...", "Where did..."
   • For MCQ, provide 4 options (A, B, C, D)
   • Include "Answer: [correct answer]" at the end
-  • Brief explanation
+  • Include "Explanation:" in 1-3 direct sentences
 
-📊 EASY DIFFICULTY BOUNDARIES:
-- Question type: Direct recall, identification, basic facts
+FOUNDATION CHECK CONSTRAINTS:
+- UI difficulty label: Easy
+- Question type: Direct recall, identification, core facts
 - Completion time: Under 5 minutes
-- Cognitive level: Remember, Identify
+- Bloom-aligned target: Remember, Identify
 
-**Slide Type 4: MEDIUM QUESTION (Analysis/Comparison)**
-- Title: "[Topic Name]: Practice Question 2 (Analytical)"
+**Slide Type 4: MULTI-STEP APPLICATION**
+- Title: "[Topic Name]: Practice Question 2"
 - Content: Question requiring analysis or comparison.
   • "Compare X and Y", "Explain the significance of...", "What were the causes of..."
   • "Differentiate between...", "Describe the characteristics of..."
   • Include "Answer:" with detailed explanation
   • Mention multiple aspects or perspectives
 
-📊 MEDIUM DIFFICULTY BOUNDARIES:
+MULTI-STEP APPLICATION CONSTRAINTS:
+- UI difficulty label: Medium
 - Question type: Compare, Contrast, Explain, Analyze
 - Completion time: 10-15 minutes
-- Cognitive level: Understand, Analyze, Compare
+- Bloom-aligned target: Understand, Analyze, Compare
 
-**Slide Type 5: HARD QUESTION (Synthesis/Evaluation)**
+**Slide Type 5: INTEGRATED CHALLENGE**
 - Title: "[Topic Name]: Challenge Question (Critical Thinking)"
 - Content: Question requiring synthesis and evaluation.
   • "How does X relate to Y?", "Analyze the impact of...", "Evaluate the role of..."
   • "To what extent...", "Justify...", "Critically assess..."
   • Include "Approach:" with thinking framework
-  • Include "Answer:" with comprehensive analysis
+  • Include "Answer:" with structured analysis
   • Discuss multiple viewpoints or interpretations
 
-📊 HARD DIFFICULTY BOUNDARIES:
+INTEGRATED CHALLENGE CONSTRAINTS:
+- UI difficulty label: Hard
 - Question type: Evaluate, Synthesize, Justify, Critically analyze
 - Completion time: 20-30 minutes
-- Cognitive level: Synthesize, Evaluate, Create connections
-- Target: Requires deep understanding and critical thinking
+- Bloom-aligned target: Evaluate, Synthesize, Create connections
+- Standard: requires evidence-based reasoning and multi-perspective judgment
 
 **FINAL SLIDE: SUMMARY**
 After all topics are covered, create ONE summary slide:
@@ -430,7 +521,7 @@ OUTPUT FORMAT:
 
 IMPORTANT:
 - Generate EXACTLY {total_slides} slides ({num_topics} topics × 5 slides + 1 summary)
-- Follow the structure strictly: Definition → Explanation → Easy Q → Medium Q → Hard Q for EACH topic
+- Follow the structure strictly: Definition → Explanation → Foundation Check → Multi-Step Application → Integrated Challenge for EACH topic
 - Questions MUST include answers and detailed explanations
 - Make content grade-appropriate for Class {request.gradeLevel}
 
@@ -451,18 +542,21 @@ Please incorporate these instructions into your deck content.
         else:
             # Legacy format for backward compatibility (shouldn't normally reach here)
             system_message = """You are an educational content designer. Create engaging presentation content."""
-            prompt = f"Create a simple deck about {request.topic} for {request.subject} grade {request.gradeLevel}"
+            prompt = f"Create a focused deck about {request.topic} for {request.subject} grade {request.gradeLevel}"
             logger.info(f"Generating legacy deck for topic: {request.topic}")
 
         result = await generate_json_completion(
             prompt=prompt,
             system_message=system_message,
             max_tokens=4000,  # Increased for structured content
-            temperature=0.7
+            temperature=0.3
         )
 
         # Validate slide count
-        expected_slides = len(topics_list) * 5 + 1 if use_structured else request.numSlides
+        if use_structured:
+            expected_slides = len(topics_list) * (8 if subject_type == 'quantitative' else 5) + 1
+        else:
+            expected_slides = request.numSlides
         if len(result["slides"]) != expected_slides:
             logger.warning(f"Generated {len(result['slides'])} slides but {expected_slides} were expected")
 
@@ -533,10 +627,15 @@ Please incorporate these instructions into your deck content.
         logger.info(f"Deck generation complete: {len(enriched_slides)} slides, "
                    f"{visuals_generated} visuals generated successfully")
 
-        return DeckGenerateResponse(
-            title=result["title"],
-            slides=enriched_slides
+        lesson_deck = _lesson_from_payload(
+            slides_data=result.get("slides", []),
+            topic=result.get("title") or request.topic or ", ".join(topics_list),
+            subject=request.subject,
+            grade_level=request.gradeLevel,
+            theme=request.theme,
+            fallback_slides=enriched_slides,
         )
+        return _build_response(lesson_deck, title=result.get("title"))
 
     except Exception as e:
         logger.error(f"Deck generation failed: {str(e)}")
@@ -568,10 +667,34 @@ async def generate_deck_pptx(request: DeckGenerateRequest):
         )
         
         # Step 3: Create LessonDeck
-        from app.models.lesson_schema import LessonDeck, LessonMetadata, LearningStructure, LearningObjective, Slide, DifferentiationLevel
-        
+        from app.models.lesson_schema import LessonDeck, LessonMetadata, LearningStructure, LearningObjective, Slide, DifferentiationLevel, VisualMetadata
+
         slides = [Slide(**s) for s in slides_data]
-        
+        slides_for_visuals = [{"title": slide.title, "content": slide.content} for slide in slides]
+        visual_routes = await batch_route_slides(
+            slides=slides_for_visuals,
+            subject=request.subject,
+            enable_paid_services=False
+        )
+        visual_results = await batch_generate_visuals(
+            slides=slides_for_visuals,
+            visual_routes=visual_routes,
+            subject=request.subject
+        )
+        for slide, visual_route, visual_result in zip(slides, visual_routes, visual_results):
+            if not visual_route.get("visualType") or not visual_result.get("success"):
+                continue
+
+            visual_config = dict(visual_route.get("visualConfig") or {})
+            visual_config["generatedData"] = visual_result.get("data", {})
+            slide.visualMetadata = VisualMetadata(
+                visualType=visual_route.get("visualType"),
+                visualConfig=visual_config,
+                confidence=visual_route.get("confidence"),
+                generatedBy=visual_route.get("generatedBy"),
+                reasoning=visual_route.get("reasoning")
+            )
+
         lesson_deck = LessonDeck(
             meta=LessonMetadata(
                 topic=request.topic or ", ".join(request.topics),
@@ -664,7 +787,7 @@ async def generate_complete_deck(request: DeckGenerateRequest):
         
         # Step 3: Create LessonDeck structure
         logger.info("[Step 3/4] Creating LessonDeck...")
-        from app.models.lesson_schema import LessonDeck, LessonMetadata, LearningStructure, LearningObjective, Slide, SlideType, BloomLevel
+        from app.models.lesson_schema import LessonDeck, LessonMetadata, LearningStructure, LearningObjective, Slide, SlideType, BloomLevel, VisualMetadata
         
         # Convert slide dicts to proper Slide objects
         slide_objects = []
@@ -683,7 +806,6 @@ async def generate_complete_deck(request: DeckGenerateRequest):
                 slide_type = SlideType.CONCEPT
             
             slide_obj = Slide(
-                id=str(i + 1),
                 title=slide.get('title', f'Slide {i+1}'),
                 content=slide.get('content', ''),
                 order=slide.get('order', i + 1),
@@ -693,6 +815,36 @@ async def generate_complete_deck(request: DeckGenerateRequest):
                 imageQuery=slide.get('imageQuery', None)
             )
             slide_objects.append(slide_obj)
+
+        # Step 3b: Build dynamic visual decisions for generated charts, diagrams, and math.
+        # Stock photos are handled separately by imageQuery and only when VisualDirector is confident.
+        slides_for_visuals = [
+            {"title": slide.title, "content": slide.content}
+            for slide in slide_objects
+        ]
+        visual_routes = await batch_route_slides(
+            slides=slides_for_visuals,
+            subject=request.subject,
+            enable_paid_services=False
+        )
+        visual_results = await batch_generate_visuals(
+            slides=slides_for_visuals,
+            visual_routes=visual_routes,
+            subject=request.subject
+        )
+        for slide_obj, visual_route, visual_result in zip(slide_objects, visual_routes, visual_results):
+            if not visual_route.get("visualType") or not visual_result.get("success"):
+                continue
+
+            visual_config = dict(visual_route.get("visualConfig") or {})
+            visual_config["generatedData"] = visual_result.get("data", {})
+            slide_obj.visualMetadata = VisualMetadata(
+                visualType=visual_route.get("visualType"),
+                visualConfig=visual_config,
+                confidence=visual_route.get("confidence"),
+                generatedBy=visual_route.get("generatedBy"),
+                reasoning=visual_route.get("reasoning")
+            )
         
         # Extract learning objectives from slides
         learning_objectives = []
@@ -777,15 +929,23 @@ async def generate_complete_deck(request: DeckGenerateRequest):
             logger.info("[Step 4/4] Level is CORE, skipping differentiation")
             final_slides = slide_objects  # Use slide_objects for consistency
         
-        # Return format expected by backend: simple object with title and slides array
+        # Return format expected by backend: flat object with title and slides array
         level_suffix = f" ({level_value})" if level_value != 'CORE' else ""
         return {
             "title": (request.topic or ", ".join(request.topics) if request.topics else "Teaching Deck") + level_suffix,
+            "meta": lesson_deck.meta.model_dump(mode="json"),
+            "structure": lesson_deck.structure.model_dump(mode="json"),
             "slides": [
                 {
                     "title": slide.get("title", "") if isinstance(slide, dict) else slide.title,
                     "content": slide.get("content", "") if isinstance(slide, dict) else slide.content,
-                    "order": i + 1
+                    "order": i + 1,
+                    "slideType": slide.get("slideType", "CONCEPT") if isinstance(slide, dict) else slide.slideType.value,
+                    "bloom_level": slide.get("bloom_level", "UNDERSTAND") if isinstance(slide, dict) else slide.bloom_level.value,
+                    "speakerNotes": slide.get("speakerNotes", "") if isinstance(slide, dict) else slide.speakerNotes,
+                    "imageQuery": slide.get("imageQuery") if isinstance(slide, dict) else slide.imageQuery,
+                    "visualMetadata": slide.get("visualMetadata") if isinstance(slide, dict) else (slide.visualMetadata.model_dump(mode="json") if slide.visualMetadata else None),
+                    "objective": slide.get("objective", "") if isinstance(slide, dict) else slide.objective
                 }
                 for i, slide in enumerate(final_slides)
             ]
@@ -1154,7 +1314,7 @@ async def add_slide(request: AddSlideRequest):
         system_message = f"""You are an expert instructional designer creating educational slides for {request.gradeLevel} students studying {request.subject}.
 Create engaging, educationally sound content that:
 - Is age-appropriate for {request.gradeLevel}
-- Uses clear, simple language
+- Uses clear, age-appropriate language
 - Includes concrete examples when helpful
 - Follows best practices for visual learning
 
@@ -1194,9 +1354,18 @@ Return JSON:
         
         logger.info(f"✓ Slide generated: {result.get('title', 'Unknown')}")
         
+        # Sanitize content: LLM may return a list instead of a string
+        content = result.get('content', '')
+        if isinstance(content, list):
+            content = "\n".join([str(item) for item in content])
+        elif isinstance(content, dict):
+            content = json.dumps(content)
+        elif not isinstance(content, str):
+            content = str(content)
+
         return AddSlideResponse(
             title=result.get('title', 'New Slide'),
-            content=result.get('content', ''),
+            content=content,
             bloom_level=result.get('bloom_level', suggested_bloom)
         )
         
