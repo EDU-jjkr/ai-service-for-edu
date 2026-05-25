@@ -36,7 +36,7 @@ async def generate_json_completion(
     """Generate a JSON completion using OpenAI GPT-3.5-Turbo"""
     try:
         response = await client.chat.completions.create(
-            model="gpt-3.5-turbo",
+            model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": system_message},
                 {"role": "user", "content": prompt}

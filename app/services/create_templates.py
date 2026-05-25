@@ -1,151 +1,158 @@
 """
-PowerPoint Template Generator
-Creates basic functional PowerPoint templates programmatically
+PowerPoint theme seed generator.
+
+These files are not used as fragile master-slide dependencies anymore. They are
+seeded, usable sample decks for each available theme, so product demos and
+template previews look polished instead of blank.
 """
 
-from pptx import Presentation
-from pptx.util import Inches, Pt
-from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
-from pptx.dml.color import RGBColor
 from pathlib import Path
+import asyncio
 import logging
+
+from app.models.lesson_schema import (
+    BloomLevel,
+    LearningObjective,
+    LearningStructure,
+    LessonDeck,
+    LessonMetadata,
+    Slide,
+    SlideType,
+)
+from app.services.pptx_renderer import PPTXRenderer, THEMES
 
 logger = logging.getLogger(__name__)
 
 
-def create_default_template():
-    """
-    Create a basic PowerPoint template with 5 layouts.
-    
-    Layouts:
-    1. Title Slide (for INTRODUCTION)
-    2. Content with Image Right (for CONCEPT)
-    3. Image Large with Caption (for ACTIVITY)
-    4. Two-Column Layout (for ASSESSMENT)
-    5. Summary Slide (for SUMMARY)
-    """
-    prs = Presentation()
-    prs.slide_width = Inches(10)  # 16:9 aspect ratio
-    prs.slide_height = Inches(5.625)
-    
-    logger.info("Creating default PowerPoint template...")
-    
-    # We'll use the built-in layouts and customize them
-    # Note: For now, we'll create a simple template with blank slides
-    # In production, a designer would create proper master slides in PowerPoint
-    
-    # Save to templates directory
+def _sample_deck(theme: str) -> LessonDeck:
+    theme_label = THEMES.get(theme, THEMES["default"])["name"]
+    return LessonDeck(
+        meta=LessonMetadata(
+            topic=f"{theme_label} Template",
+            subject="Template Preview",
+            grade="10",
+            standards=[],
+            theme=theme,
+        ),
+        structure=LearningStructure(
+            learning_objectives=[
+                LearningObjective(
+                    objective="Preview the title, concept, practice, and summary layouts.",
+                    bloom_level=BloomLevel.UNDERSTAND,
+                )
+            ],
+            vocabulary=[],
+            prerequisites=[],
+            bloom_progression=[
+                BloomLevel.REMEMBER,
+                BloomLevel.UNDERSTAND,
+                BloomLevel.APPLY,
+                BloomLevel.CREATE,
+            ],
+        ),
+        slides=[
+            Slide(
+                title="Start With A Strong Hook",
+                content=(
+                    "Open with one curiosity question\n"
+                    "Name the core idea in simple language\n"
+                    "Show why it matters beyond the textbook\n"
+                    "Preview what students will be able to do"
+                ),
+                order=1,
+                slideType=SlideType.INTRODUCTION,
+                bloom_level=BloomLevel.REMEMBER,
+                objective="Introduce the topic with context and purpose.",
+                imageQuery="teacher demonstrating science experiment",
+                speakerNotes="Use this slide to set purpose and activate prior knowledge.",
+            ),
+            Slide(
+                title="Make The Core Idea Visible",
+                content=(
+                    "Teach one key idea per slide\n"
+                    "Pair the idea with an example or analogy\n"
+                    "Call out one misconception early\n"
+                    "End with a quick check question"
+                ),
+                order=2,
+                slideType=SlideType.CONCEPT,
+                bloom_level=BloomLevel.UNDERSTAND,
+                objective="Explain a concept with a visual anchor.",
+                speakerNotes="Keep the slide concise and put the extra explanation here.",
+            ),
+            Slide(
+                title="Practice With Feedback",
+                content=(
+                    "Question: Which option best explains the idea?\n"
+                    "A) A surface detail only\n"
+                    "B) A cause-and-effect relationship\n"
+                    "C) An unrelated example\n"
+                    "D) A memorized definition\n"
+                    "Answer: B\n"
+                    "Explanation: Students should identify the relationship, not just recall words."
+                ),
+                order=3,
+                slideType=SlideType.ACTIVITY,
+                bloom_level=BloomLevel.APPLY,
+                objective="Apply the concept in a short check.",
+                speakerNotes="Let students answer first, then reveal the teacher key.",
+            ),
+            Slide(
+                title="Close With Transfer",
+                content=(
+                    "Students can define the key idea\n"
+                    "Students can explain it with an example\n"
+                    "Students can avoid the common misconception\n"
+                    "Students can apply it to a new scenario"
+                ),
+                order=4,
+                slideType=SlideType.SUMMARY,
+                bloom_level=BloomLevel.CREATE,
+                objective="Summarize learning and transfer it forward.",
+                speakerNotes="Use this as an exit-ticket prompt.",
+            ),
+        ],
+    )
+
+
+async def create_theme_template(theme: str) -> str:
     templates_dir = Path(__file__).parent.parent / "templates"
     templates_dir.mkdir(exist_ok=True)
-    
-    template_path = templates_dir / "default.pptx"
-    
-    # Create a simple slide to initialize the template
-    blank_layout = prs.slide_layouts[6]  # Blank layout
-    slide = prs.slides.add_slide(blank_layout)
-    
-    # Add a text box as instruction
-    left = Inches(1)
-    top = Inches(2)
-    width = Inches(8)
-    height = Inches(1)
-    
-    txBox = slide.shapes.add_textbox(left, top, width, height)
-    tf = txBox.text_frame
-    tf.text = "PowerPoint Template - Default Theme"
-    
-    p = tf.paragraphs[0]
-    p.font.size = Pt(32)
-    p.font.bold = True
-    p.alignment = PP_ALIGN.CENTER
-    
-    # Save template
-    prs.save(str(template_path))
-    
-    logger.info(f"✓ Template created: {template_path}")
-    return str(template_path)
+    output_path = templates_dir / f"{theme}.pptx"
+    pptx = await PPTXRenderer(theme=theme).render_lesson_deck(_sample_deck(theme))
+    output_path.write_bytes(pptx.getvalue())
+    logger.info("Template created: %s", output_path)
+    return str(output_path)
 
 
-def create_science_template():
+async def create_all_templates() -> list[str]:
+    created = []
+    for theme in THEMES:
+        created.append(await create_theme_template(theme))
+    return created
+
+
+def initialize_templates(force: bool = True) -> list[str]:
     """
-    Create a Science & Nature themed template.
-    
-    Features:
-    - Green/blue color scheme
-    - Nature-inspired fonts
-    - Appropriate for science subjects
-    """
-    prs = Presentation()
-    prs.slide_width = Inches(10)
-    prs.slide_height = Inches(5.625)
-    
-    logger.info("Creating science theme template...")
-    
-    blank_layout = prs.slide_layouts[6]
-    slide = prs.slides.add_slide(blank_layout)
-    
-    # Background color (light green)
-    background = slide.background
-    fill = background.fill
-    fill.solid()
-    fill.fore_color.rgb = RGBColor(230, 245, 240)  # Light mint green
-    
-    # Title text
-    left = Inches(1)
-    top = Inches(2)
-    width = Inches(8)
-    height = Inches(1)
-    
-    txBox = slide.shapes.add_textbox(left, top, width, height)
-    tf = txBox.text_frame
-    tf.text = "Science & Nature Theme"
-    
-    p = tf.paragraphs[0]
-    p.font.size = Pt(32)
-    p.font.bold = True
-    p.font.color.rgb = RGBColor(34, 139, 34)  # Forest green
-    p.alignment = PP_ALIGN.CENTER
-    
-    # Save template
-    templates_dir = Path(__file__).parent.parent / "templates"
-    templates_dir.mkdir(exist_ok=True)
-    
-    template_path = templates_dir / "science_nature.pptx"
-    prs.save(str(template_path))
-    
-    logger.info(f"✓ Template created: {template_path}")
-    return str(template_path)
+    Seed all templates.
 
-
-def initialize_templates():
-    """
-    Initialize all default templates if they don't exist.
-    
-    Call this on application startup.
+    force=True refreshes old placeholder files so existing installations get the
+    upgraded design immediately.
     """
     templates_dir = Path(__file__).parent.parent / "templates"
     templates_dir.mkdir(exist_ok=True)
-    
-    # Create default template if missing
-    default_path = templates_dir / "default.pptx"
-    if not default_path.exists():
-        logger.info("Default template missing, creating...")
-        create_default_template()
-    else:
-        logger.info("✓ Default template exists")
-    
-    # Create science template if missing
-    science_path = templates_dir / "science_nature.pptx"
-    if not science_path.exists():
-        logger.info("Science template missing, creating...")
-        create_science_template()
-    else:
-        logger.info("✓ Science template exists")
+    if force:
+        return asyncio.run(create_all_templates())
+
+    missing = [theme for theme in THEMES if not (templates_dir / f"{theme}.pptx").exists()]
+    created = []
+    for theme in missing:
+        created.append(asyncio.run(create_theme_template(theme)))
+    return created
 
 
 if __name__ == "__main__":
-    # Run this script to generate templates
     logging.basicConfig(level=logging.INFO)
-    initialize_templates()
-    print("\n✅ Templates initialized successfully!")
+    paths = initialize_templates(force=True)
+    print(f"Templates initialized: {len(paths)}")
     print(f"Location: {Path(__file__).parent.parent / 'templates'}")

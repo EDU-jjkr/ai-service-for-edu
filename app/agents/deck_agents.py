@@ -1,6 +1,7 @@
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from app.services.openai_service import generate_json_completion, stream_completion
 from app.models.lesson_schema import BloomLevel, SlideType
+from app.services.prompt_stack import PromptBundle
 import json
 import logging
 import asyncio
@@ -15,7 +16,12 @@ class OutlinerAgent:
     """
     
     @staticmethod
-    async def create_outline(topic: str, subject: str, grade_level: str) -> List[Dict[str, str]]:
+    async def create_outline(
+        topic: str,
+        subject: str,
+        grade_level: str,
+        prompt_bundle: Optional[PromptBundle] = None,
+    ) -> List[Dict[str, str]]:
         """
         Create a curriculum-aligned outline using RAG with strict Bloom's Taxonomy progression.
         """
@@ -44,7 +50,7 @@ class OutlinerAgent:
             standards = []
         
         # Enhanced system message with Bloom's Taxonomy instructions
-        system_message = """You are an expert curriculum designer with deep knowledge of Bloom's Taxonomy.
+        base_system_message = """You are an expert curriculum designer with deep knowledge of Bloom's Taxonomy.
 
 CRITICAL: Design a lesson that STRICTLY follows Bloom's Taxonomy progression:
 1. Start with REMEMBER (recall facts, define terms, list key points)
@@ -79,10 +85,11 @@ SLIDE TYPE GUIDELINES WITH MANDATORY PRACTICE:
 Return a JSON object with a 'slides' key containing a list of slide outlines."""
 
         # Inject standards into system message if available
+        system_message = base_system_message
         if standards:
             system_message = rag.inject_into_prompt(standards, system_message)
 
-        prompt = f"""Create a lesson outline for:
+        base_prompt = f"""Create a lesson outline for:
 Topic: {topic}
 Subject: {subject}
 Grade: {grade_level}
@@ -121,6 +128,11 @@ MANDATORY REQUIREMENTS:
 - Include at least 1-2 practice questions for EACH sub-topic
 - Include a \"Final Challenge Round\" assessment with 3+ mixed questions
 - Ensure smooth Bloom's Taxonomy progression"""
+        prompt = base_prompt
+
+        if prompt_bundle:
+            system_message = "\n\n".join([prompt_bundle.system_prompt, system_message])
+            prompt = "\n\n".join([prompt_bundle.user_prompt, base_prompt])
 
         try:
             result = await generate_json_completion(
@@ -185,7 +197,7 @@ class ContentAgent:
         # Check if this is a science/physics subject that needs detailed explanations
         is_science = any(kw in subject.lower() for kw in ['physics', 'chemistry', 'science', 'biology'])
         
-        system_message = f"""You are an expert teacher for Grade {grade_level} {subject}.
+        base_system_message = f"""You are an expert teacher for Grade {grade_level} {subject}.
 Write COMPREHENSIVE teaching content for a presentation slide.
 This content will be used to actually TEACH students, so be thorough.
 Do not include markdown for bolding (**), just plain text.
@@ -262,7 +274,7 @@ Provide:
         else:
             content_guidance = "Provide comprehensive content with 6-8 detailed points."
         
-        prompt = f"""Write DETAILED teaching content for this slide:
+        base_prompt = f"""Write DETAILED teaching content for this slide:
 Title: {slide_outline['title']}
 Type: {slide_type}
 Bloom's Level: {bloom_level}
@@ -272,6 +284,13 @@ Objective: {slide_outline['objective']}
 
 Remember: This content will be used to TEACH students. Be thorough, clear, and educational.
 Include enough detail that a teacher can use this to deliver a complete lesson on the topic."""
+        prompt_bundle = slide_outline.get("prompt_stack")
+        if prompt_bundle:
+            system_message = "\n\n".join([prompt_bundle.system_prompt, base_system_message])
+            prompt = "\n\n".join([prompt_bundle.user_prompt, base_prompt])
+        else:
+            system_message = base_system_message
+            prompt = base_prompt
 
         async for chunk in stream_completion(prompt, system_message, max_tokens=800):
             yield chunk
@@ -378,6 +397,50 @@ Include enough detail that a teacher can use this to deliver a complete lesson o
         logger.info(f"✓ Generated {len(slides)} slides")
         
         return list(slides)
+
+    @staticmethod
+    def build_generation_outline(
+        structured_slides: List[Any],
+        outline: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Normalize structured slide shells into the outline shape expected by
+        the slide content generator while preserving planner-driven ordering.
+        """
+        normalized_outline: List[Dict[str, Any]] = []
+        source_outline = outline or []
+        total_slides = max(len(structured_slides), len(source_outline))
+
+        for index in range(total_slides):
+            outline_slide = source_outline[index] if index < len(source_outline) else {}
+            structured_slide = structured_slides[index] if index < len(structured_slides) else None
+
+            if structured_slide is not None and hasattr(structured_slide, "title"):
+                title = structured_slide.title
+                slide_type = structured_slide.slideType.value
+                bloom_level = structured_slide.bloom_level.value
+                objective = structured_slide.objective or outline_slide.get("objective") or structured_slide.title
+            elif structured_slide is not None:
+                title = structured_slide.get("title", outline_slide.get("title", f"Slide {index + 1}"))
+                slide_type = structured_slide.get("slideType", outline_slide.get("slideType", "CONCEPT"))
+                bloom_level = structured_slide.get("bloom_level", outline_slide.get("bloom_level", "UNDERSTAND"))
+                objective = structured_slide.get("objective") or outline_slide.get("objective") or title
+            else:
+                title = outline_slide.get("title", f"Slide {index + 1}")
+                slide_type = outline_slide.get("slideType", "CONCEPT")
+                bloom_level = outline_slide.get("bloom_level", "UNDERSTAND")
+                objective = outline_slide.get("objective") or title
+
+            normalized_outline.append(
+                {
+                    "title": title,
+                    "slideType": slide_type,
+                    "bloom_level": bloom_level,
+                    "objective": objective,
+                }
+            )
+
+        return normalized_outline
     
     @staticmethod
     async def generate_speaker_notes(title: str, content: str, bloom_level: str, subject: str) -> str:

@@ -16,7 +16,8 @@ from app.models.lesson_schema import (
     Slide,
     DeckGenerateRequest,
     DeckGenerateResponse,
-    DeckGenerateResponseLegacy
+    DeckGenerateResponseLegacy,
+    PPTXRenderRequest,
 )
 
 class ActivityGenerateRequest(BaseModel):

@@ -8,8 +8,21 @@ import requests
 from typing import Optional, Tuple
 from io import BytesIO
 import logging
+from PIL import Image, ImageDraw, ImageFont
+
+from app.services.curated_assets import CuratedAsset, is_curated_image_query, parse_curated_image_query
 
 logger = logging.getLogger(__name__)
+
+WEAK_QUANTITATIVE_QUERY_MARKERS = (
+    "students studying",
+    "classroom",
+    "teacher teaching",
+    "school classroom",
+    "math classroom",
+    "physics classroom",
+    "generic classroom",
+)
 
 
 class StockPhotoService:
@@ -44,14 +57,24 @@ class StockPhotoService:
         Args:
             query: Search query (e.g., "sun shining on ocean")
             orientation: "landscape" or "portrait"
-            subject: Subject area for placeholder theming
+            subject: Subject area for future provider-specific filtering
             
         Returns:
             Tuple of (image_stream, attribution_text)
-            Returns placeholder image if stock photos fail
+            Returns (None, None) if stock photos fail. The renderer will
+            choose a text-first layout instead of drawing a fake image.
         """
         if not query:
             logger.warning("Empty query provided to fetch_image")
+            return None, None
+
+        if is_curated_image_query(query):
+            logger.info("Resolving curated image marker without provider fetch")
+            return self._build_curated_asset_image(query)
+
+        query_lower = query.lower()
+        if subject.lower() in {"physics", "mathematics", "math"} and any(marker in query_lower for marker in WEAK_QUANTITATIVE_QUERY_MARKERS):
+            logger.info("Skipping weak generic stock-photo fallback for quantitative subject")
             return None, None
         
         # Try Unsplash first
@@ -68,31 +91,59 @@ class StockPhotoService:
             logger.info(f"✓ Pexels image fetched for: '{query}'")
             return image_data
         
-        # Final fallback: Generate placeholder image
-        logger.warning(f"Stock photos failed for '{query}', generating placeholder")
-        try:
-            from app.services.placeholder_generator import generate_placeholder_image
-            
-            # Determine dimensions based on orientation
-            if orientation == "portrait":
-                width, height = 1080, 1920
-            else:
-                width, height = 1920, 1080
-            
-            placeholder = generate_placeholder_image(
-                image_query=query,
-                width=width,
-                height=height,
-                subject=subject
-            )
-            
-            attribution = f"Placeholder: {query}"
-            logger.info(f"✓ Placeholder generated for: '{query}'")
-            return placeholder, attribution
-            
-        except Exception as e:
-            logger.error(f"Placeholder generation also failed: {e}")
+        logger.warning(f"Stock photos failed for '{query}', skipping image placement")
+        return None, None
+
+    def _build_curated_asset_image(self, query: str) -> Tuple[Optional[BytesIO], Optional[str]]:
+        asset, prompt_hint = parse_curated_image_query(query)
+        if asset is None:
+            logger.warning("Curated image marker could not be resolved: %s", query)
             return None, None
+
+        image = Image.new("RGB", (1280, 720), color="#F3F7EC")
+        draw = ImageDraw.Draw(image)
+        title_font = ImageFont.load_default()
+        body_font = ImageFont.load_default()
+
+        draw.rounded_rectangle((48, 48, 1232, 672), radius=24, fill="#FFFFFF", outline="#5A7D4B", width=4)
+        draw.rounded_rectangle((72, 72, 340, 128), radius=18, fill="#DDECC8")
+        draw.text((96, 90), f"{asset.asset_type.upper()} ASSET", fill="#2E4A1F", font=title_font)
+
+        draw.text((96, 170), asset.title, fill="#1E2F16", font=title_font)
+        draw.text((96, 220), f"Asset ID: {asset.asset_id}", fill="#4A5A42", font=body_font)
+        draw.text((96, 270), "Instructional cue:", fill="#2E4A1F", font=body_font)
+        draw.multiline_text((96, 305), prompt_hint or asset.prompt_hint, fill="#24301F", font=body_font, spacing=8)
+
+        self._draw_curated_diagram(draw, asset)
+
+        image_stream = BytesIO()
+        image.save(image_stream, format="PNG")
+        image_stream.seek(0)
+
+        attribution = f"Curated instructional asset: {asset.title} ({asset.asset_id})"
+        return image_stream, attribution
+
+    def _draw_curated_diagram(self, draw: ImageDraw.ImageDraw, asset: CuratedAsset) -> None:
+        if asset.asset_id == "biology/photosynthesis/core-diagram":
+            draw.ellipse((760, 170, 1130, 540), fill="#CFE7B0", outline="#4E7A39", width=5)
+            draw.ellipse((850, 260, 1040, 450), fill="#A9D27F", outline="#4E7A39", width=4)
+            draw.text((835, 465), "chloroplast", fill="#1F3A18", font=ImageFont.load_default())
+
+            draw.line((600, 250, 760, 250), fill="#F2B84B", width=8)
+            draw.polygon([(760, 250), (730, 235), (730, 265)], fill="#F2B84B")
+            draw.text((500, 220), "sunlight", fill="#8A5A00", font=ImageFont.load_default())
+
+            draw.line((600, 360, 760, 360), fill="#5A9BD5", width=8)
+            draw.polygon([(760, 360), (730, 345), (730, 375)], fill="#5A9BD5")
+            draw.text((430, 330), "water + carbon dioxide", fill="#1F4E79", font=ImageFont.load_default())
+
+            draw.line((1130, 340, 1210, 340), fill="#D96C75", width=8)
+            draw.polygon([(1210, 340), (1180, 325), (1180, 355)], fill="#D96C75")
+            draw.text((1040, 305), "glucose + oxygen", fill="#7A1F28", font=ImageFont.load_default())
+            return
+
+        draw.rounded_rectangle((760, 180, 1140, 520), radius=22, fill="#E8F0D9", outline="#6A8A59", width=4)
+        draw.text((820, 330), asset.asset_type.title(), fill="#2E4A1F", font=ImageFont.load_default())
     
     async def _fetch_from_unsplash(
         self, 
