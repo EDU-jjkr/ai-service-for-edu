@@ -6,7 +6,7 @@ from app.models.schemas import (
     FollowUpRequest,
     FollowUpResponse
 )
-from app.services.openai_service import generate_json_completion, generate_completion
+from app.services.openai_service import generate_json_completion, generate_completion, llm_request_context
 
 router = APIRouter()
 
@@ -14,11 +14,12 @@ router = APIRouter()
 async def solve_text_doubt(request: DoubtRequest):
     """Solve a student doubt from text input"""
     try:
-        # Build grade-appropriate context
-        grade_context = f"Grade Level: {request.gradeLevel}" if request.gradeLevel else "general student"
-        subject_context = f"Subject: {request.subject}" if request.subject else "subject to be identified"
-        
-        system_message = """You are an exceptional tutor with a gift for making complex concepts clear and accessible. You combine the patience of a great teacher with deep subject expertise across all academic disciplines.
+        with llm_request_context(request.aiProvider, request.aiModel):
+            # Build grade-appropriate context
+            grade_context = f"Grade Level: {request.gradeLevel}" if request.gradeLevel else "general student"
+            subject_context = f"Subject: {request.subject}" if request.subject else "subject to be identified"
+
+            system_message = """You are an exceptional tutor with a gift for making complex concepts clear and accessible. You combine the patience of a great teacher with deep subject expertise across all academic disciplines.
 
 Your tutoring philosophy:
 - NEVER just give answers - always guide students to understand WHY
@@ -41,7 +42,7 @@ You NEVER do homework for students - instead, you teach them HOW to solve proble
 
 Always respond with valid, well-structured JSON."""
 
-        prompt = f"""A student needs help with the following question:
+            prompt = f"""A student needs help with the following question:
 
 STUDENT QUESTION: "{request.question}"
 
@@ -190,14 +191,14 @@ TUTORING MINDSET:
 
 Generate the complete tutoring response now. Make it clear, encouraging, and genuinely educational."""
 
-        result = await generate_json_completion(
-            prompt=prompt,
-            system_message=system_message,
-            max_tokens=2800,  # Increased for detailed explanations
-            temperature=0.6   # Lower for more consistent pedagogical quality
-        )
+            result = await generate_json_completion(
+                prompt=prompt,
+                system_message=system_message,
+                max_tokens=2800,  # Increased for detailed explanations
+                temperature=0.6   # Lower for more consistent pedagogical quality
+            )
 
-        return DoubtResponse(**result)
+            return DoubtResponse(**result)
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to solve doubt: {str(e)}")
@@ -247,7 +248,8 @@ async def solve_voice_doubt(
 async def answer_follow_up(request: FollowUpRequest):
     """Answer a follow-up question to a previous doubt"""
     try:
-        system_message = """You are a patient, encouraging tutor in an ongoing conversation with a student. They've already received an explanation and now have a follow-up question.
+        with llm_request_context(request.aiProvider, request.aiModel):
+            system_message = """You are a patient, encouraging tutor in an ongoing conversation with a student. They've already received an explanation and now have a follow-up question.
 
 Your approach:
 - Treat this as a natural teaching dialogue
@@ -260,7 +262,7 @@ Your approach:
 
 Always respond with valid JSON."""
 
-        prompt = f"""You're continuing a tutoring session with a student.
+            prompt = f"""You're continuing a tutoring session with a student.
 
 ORIGINAL QUESTION: 
 {request.originalQuestion}
@@ -324,14 +326,14 @@ RESPONSE GUIDELINES:
 
 Generate the follow-up response now. Make it helpful, encouraging, and precisely targeted to their question."""
 
-        result = await generate_json_completion(
-            prompt=prompt,
-            system_message=system_message,
-            max_tokens=1800,  # Increased for thorough follow-ups
-            temperature=0.7   # Maintain conversational warmth
-        )
+            result = await generate_json_completion(
+                prompt=prompt,
+                system_message=system_message,
+                max_tokens=1800,  # Increased for thorough follow-ups
+                temperature=0.7   # Maintain conversational warmth
+            )
 
-        return FollowUpResponse(**result)
+            return FollowUpResponse(**result)
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to answer follow-up: {str(e)}")

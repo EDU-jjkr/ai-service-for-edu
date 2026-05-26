@@ -11,7 +11,7 @@ from app.models.schemas import (
     DifferentiationPlan
 )
 from app.models.modify_schemas import LessonPlanModifyRequest
-from app.services.openai_service import generate_json_completion
+from app.services.openai_service import generate_json_completion, llm_request_context
 import logging
 import math
 
@@ -23,24 +23,25 @@ router = APIRouter()
 async def generate_lesson_plan(request: LessonPlanGenerateRequest):
     """Generate a complete multi-session lesson plan using AI"""
     try:
-        # DEFENSIVE: Ensure all topics are strings and filter out empty ones
-        topics_list = [str(topic) for topic in request.topics if topic]
-        topics_str = ", ".join(topics_list)
-        num_topics = len(topics_list)
-        
-        # Calculate number of sessions based on topic count
-        # Rule: ~1-2 topics per session for thorough coverage
-        class_duration = request.classDuration
-        num_sessions = max(1, math.ceil(num_topics / 1.5))  # Avg 1.5 topics per session
-        total_duration = num_sessions * class_duration  # Calculate total based on sessions
-        
-        # Calculate time allocations per session using research-based lesson structure
-        intro_time = max(5, int(class_duration * 0.12))  # 12% for hook/intro
-        main_time = int(class_duration * 0.65)  # 65% for core instruction (I Do, We Do, You Do)
-        assessment_time = max(3, int(class_duration * 0.10))  # 10% for formative checks
-        closure_time = max(5, int(class_duration * 0.13))  # 13% for closure
-        
-        system_message = """You are a master educator and curriculum specialist with expertise in backward design, differentiated instruction, and evidence-based teaching practices. You have deep knowledge of learning standards, cognitive science, and classroom management.
+        with llm_request_context(request.aiProvider, request.aiModel):
+            # DEFENSIVE: Ensure all topics are strings and filter out empty ones
+            topics_list = [str(topic) for topic in request.topics if topic]
+            topics_str = ", ".join(topics_list)
+            num_topics = len(topics_list)
+
+            # Calculate number of sessions based on topic count
+            # Rule: ~1-2 topics per session for thorough coverage
+            class_duration = request.classDuration
+            num_sessions = max(1, math.ceil(num_topics / 1.5))  # Avg 1.5 topics per session
+            total_duration = num_sessions * class_duration  # Calculate total based on sessions
+
+            # Calculate time allocations per session using research-based lesson structure
+            intro_time = max(5, int(class_duration * 0.12))  # 12% for hook/intro
+            main_time = int(class_duration * 0.65)  # 65% for core instruction (I Do, We Do, You Do)
+            assessment_time = max(3, int(class_duration * 0.10))  # 10% for formative checks
+            closure_time = max(5, int(class_duration * 0.13))  # 13% for closure
+
+            system_message = """You are a master educator and curriculum specialist with expertise in backward design, differentiated instruction, and evidence-based teaching practices. You have deep knowledge of learning standards, cognitive science, and classroom management.
 
 Your lesson plans are known for:
 - Clear alignment between objectives, activities, and assessments
@@ -56,7 +57,7 @@ You design lessons that are immediately implementable by any qualified teacher, 
 
 Always respond with valid, comprehensive JSON that follows professional lesson planning standards."""
 
-        prompt = f"""Design a complete, professional-grade MULTI-SESSION lesson plan using backward design principles.
+            prompt = f"""Design a complete, professional-grade MULTI-SESSION lesson plan using backward design principles.
 
 LESSON SPECIFICATIONS:
 - Topics to Cover: {topics_str}
@@ -272,68 +273,68 @@ ACCOMMODATIONS (for IEP/ELL students, optional):
 
 Generate the complete {num_sessions}-session lesson plan now. Make it detailed, professional, and immediately usable for classroom instruction."""
 
-        result = await generate_json_completion(
-            prompt=prompt,
-            system_message=system_message,
-            max_tokens=4000,  # Max supported by model
-            temperature=0.6
-        )
-
-        # Transform and validate response
-        concepts = [Concept(**c) for c in result.get("concepts", [])]
-        
-        sessions = []
-        for s in result.get("sessions", []):
-            intro = SessionIntroduction(**s.get("introduction", {}))
-            activities = [LessonStep(**a) for a in s.get("activities", [])]
-            checks = [CheckForUnderstanding(**c) for c in s.get("checkForUnderstanding", [])]
-            
-            session = LessonSession(
-                sessionNumber=s.get("sessionNumber", 1),
-                title=s.get("title", f"Session {s.get('sessionNumber', 1)}"),
-                duration=s.get("duration", class_duration),
-                objectives=s.get("objectives", []),
-                introduction=intro,
-                activities=activities,
-                checkForUnderstanding=checks,
-                closure=s.get("closure", "")
+            result = await generate_json_completion(
+                prompt=prompt,
+                system_message=system_message,
+                max_tokens=4000,  # Max supported by model
+                temperature=0.6
             )
-            sessions.append(session)
-        
-        # Validate timing for each session
-        for session in sessions:
-            session_time = sum(step.duration for step in session.activities)
-            if abs(session_time - session.duration) > 10:  # Allow 10 min variance
-                logger.warning(f"Session {session.sessionNumber} duration mismatch: activities={session_time}, expected={session.duration}")
 
-        # Build assessment plan
-        assessments_data = result.get("assessments", {})
-        assessments = AssessmentPlan(
-            formative=assessments_data.get("formative", []),
-            summative=assessments_data.get("summative", "End-of-lesson assessment")
-        )
-        
-        # Build differentiation plan
-        diff_data = result.get("differentiation", {})
-        differentiation = DifferentiationPlan(
-            support=diff_data.get("support", []),
-            extension=diff_data.get("extension", []),
-            accommodations=diff_data.get("accommodations")
-        )
-        
-        return LessonPlanGenerateResponse(
-            title=result.get("title", "Lesson Plan"),
-            objectives=result.get("objectives", []),
-            prerequisites=result.get("prerequisites", []),
-            standards=result.get("standards"),
-            concepts=concepts,
-            sessions=sessions,
-            assessments=assessments,
-            resources=result.get("resources", []),
-            differentiation=differentiation,
-            totalSessions=len(sessions),
-            totalDuration=sum(s.duration for s in sessions)
-        )
+            # Transform and validate response
+            concepts = [Concept(**c) for c in result.get("concepts", [])]
+
+            sessions = []
+            for s in result.get("sessions", []):
+                intro = SessionIntroduction(**s.get("introduction", {}))
+                activities = [LessonStep(**a) for a in s.get("activities", [])]
+                checks = [CheckForUnderstanding(**c) for c in s.get("checkForUnderstanding", [])]
+
+                session = LessonSession(
+                    sessionNumber=s.get("sessionNumber", 1),
+                    title=s.get("title", f"Session {s.get('sessionNumber', 1)}"),
+                    duration=s.get("duration", class_duration),
+                    objectives=s.get("objectives", []),
+                    introduction=intro,
+                    activities=activities,
+                    checkForUnderstanding=checks,
+                    closure=s.get("closure", "")
+                )
+                sessions.append(session)
+
+            # Validate timing for each session
+            for session in sessions:
+                session_time = sum(step.duration for step in session.activities)
+                if abs(session_time - session.duration) > 10:  # Allow 10 min variance
+                    logger.warning(f"Session {session.sessionNumber} duration mismatch: activities={session_time}, expected={session.duration}")
+
+            # Build assessment plan
+            assessments_data = result.get("assessments", {})
+            assessments = AssessmentPlan(
+                formative=assessments_data.get("formative", []),
+                summative=assessments_data.get("summative", "End-of-lesson assessment")
+            )
+
+            # Build differentiation plan
+            diff_data = result.get("differentiation", {})
+            differentiation = DifferentiationPlan(
+                support=diff_data.get("support", []),
+                extension=diff_data.get("extension", []),
+                accommodations=diff_data.get("accommodations")
+            )
+
+            return LessonPlanGenerateResponse(
+                title=result.get("title", "Lesson Plan"),
+                objectives=result.get("objectives", []),
+                prerequisites=result.get("prerequisites", []),
+                standards=result.get("standards"),
+                concepts=concepts,
+                sessions=sessions,
+                assessments=assessments,
+                resources=result.get("resources", []),
+                differentiation=differentiation,
+                totalSessions=len(sessions),
+                totalDuration=sum(s.duration for s in sessions)
+            )
 
     except Exception as e:
         logger.error(f"Lesson plan generation failed: {str(e)}")

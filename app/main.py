@@ -6,7 +6,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import os
 
-from app.routers import deck, activity, lesson_plan, doubt_solver, textbook, topic
+from app.routers import deck, activity, lesson_plan, doubt_solver, textbook, topic, deck_streaming
 
 app = FastAPI(
     title="Educational Platform AI Service",
@@ -25,6 +25,7 @@ app.add_middleware(
 
 # Include routers with descriptive prefixes
 app.include_router(deck.router, prefix="/api/deck", tags=["Deck"])
+app.include_router(deck_streaming.router, prefix="/api/deck", tags=["Deck Streaming"])
 app.include_router(activity.router, prefix="/api/activity", tags=["Activity"])
 app.include_router(lesson_plan.router, prefix="/api/lesson-plan", tags=["Lesson Plans"])
 app.include_router(doubt_solver.router, prefix="/api/doubt-solver", tags=["Doubt Solver"])

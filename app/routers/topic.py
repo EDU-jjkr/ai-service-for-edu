@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from app.models.schemas import DeckGenerateRequest, DeckGenerateResponseLegacy, Slide, VisualMetadata
 from app.models.modify_schemas import DeckModifyRequest
-from app.services.openai_service import generate_json_completion
+from app.services.openai_service import generate_json_completion, llm_request_context
 from app.services.visual_routing import batch_route_slides
 from app.services.visual_generator import batch_generate_visuals
 import logging
@@ -15,8 +15,9 @@ logger = logging.getLogger(__name__)
 async def generate_topic(request: DeckGenerateRequest):
     """Generate a topic outline using AI with smart visual routing and generation"""
     try:
-        # Enhanced system message with instructional design expertise
-        system_message = """You are an elite instructional designer and master teacher with expertise in creating comprehensive topic outlines. You understand learning science, cognitive load theory, and how to structure information for maximum retention.
+        with llm_request_context(request.aiProvider, request.aiModel):
+            # Enhanced system message with instructional design expertise
+            system_message = """You are an elite instructional designer and master teacher with expertise in creating comprehensive topic outlines. You understand learning science, cognitive load theory, and how to structure information for maximum retention.
 
 Your topic outlines are known for:
 - Clear narrative flow that builds understanding step-by-step
@@ -30,12 +31,12 @@ You create topic content that teachers can directly use with minimal editing. Ea
 
 Always respond with valid, well-structured JSON."""
 
-        # Calculate recommended section allocation
-        intro_sections = 1
-        conclusion_sections = 1
-        content_sections = request.numSlides - 2
-        
-        prompt = f"""Design a comprehensive topic outline with exceptional pedagogical structure.
+            # Calculate recommended section allocation
+            intro_sections = 1
+            conclusion_sections = 1
+            content_sections = request.numSlides - 2
+
+            prompt = f"""Design a comprehensive topic outline with exceptional pedagogical structure.
 
 TOPIC OUTLINE SPECIFICATIONS:
 - Topic: "{request.topic}"
@@ -141,78 +142,78 @@ CONTENT STRUCTURE CHECKLIST:
 
 Generate the complete {request.numSlides}-section topic outline now. Make it engaging, clear, and immediately usable for classroom teaching."""
 
-        # Step 1: Generate section text content
-        logger.info(f"Generating topic for: {request.topic}, subject: {request.subject}")
-        result = await generate_json_completion(
-            prompt=prompt,
-            system_message=system_message,
-            max_tokens=3000,
-            temperature=0.7
-        )
-
-        # Validate section count matches request
-        if len(result["slides"]) != request.numSlides:
-            logger.warning(f"Generated {len(result['slides'])} sections but {request.numSlides} were requested")
-
-        # Step 2: Route sections to appropriate visual generators
-        logger.info(f"Analyzing {len(result['slides'])} sections for visual routing...")
-        
-        # Prepare sections for batch routing
-        slides_for_routing = [
-            {"title": slide["title"], "content": slide["content"]}
-            for slide in result["slides"]
-        ]
-        
-        # Get visual routing results
-        visual_routes = await batch_route_slides(
-            slides=slides_for_routing,
-            subject=request.subject,
-            enable_paid_services=False
-        )
-
-        # Step 3: Generate actual visuals for routed sections
-        logger.info(f"Generating visuals for sections...")
-        visual_results = await batch_generate_visuals(
-            slides=slides_for_routing,
-            visual_routes=visual_routes,
-            subject=request.subject
-        )
-
-        # Step 4: Combine everything - text content + visual metadata + generated visuals
-        enriched_slides = []
-        for slide_data, visual_route, visual_result in zip(result["slides"], visual_routes, visual_results):
-            # Create visual metadata with generated visual data
-            visual_metadata = None
-            if visual_route.get('visualType') and visual_result.get('success'):
-                # Merge routing info with generated visual
-                visual_config = visual_route.get('visualConfig', {})
-                visual_config['generatedData'] = visual_result.get('data', {})
-                
-                visual_metadata = VisualMetadata(
-                    visualType=visual_route['visualType'],
-                    visualConfig=visual_config,
-                    confidence=visual_route.get('confidence'),
-                    generatedBy=visual_route.get('generatedBy'),
-                    reasoning=visual_route.get('reasoning')
-                )
-            
-            slide = Slide(
-                title=slide_data["title"],
-                content=slide_data["content"],
-                order=slide_data["order"],
-                visualMetadata=visual_metadata
+            # Step 1: Generate section text content
+            logger.info(f"Generating topic for: {request.topic}, subject: {request.subject}")
+            result = await generate_json_completion(
+                prompt=prompt,
+                system_message=system_message,
+                max_tokens=3000,
+                temperature=0.7
             )
-            enriched_slides.append(slide)
-        
-        # Log statistics
-        visuals_generated = sum(1 for r in visual_results if r.get('success'))
-        logger.info(f"Topic generation complete: {len(enriched_slides)} sections, "
-                   f"{visuals_generated} visuals generated successfully")
 
-        return DeckGenerateResponseLegacy(
-            title=result["title"],
-            slides=enriched_slides
-        )
+            # Validate section count matches request
+            if len(result["slides"]) != request.numSlides:
+                logger.warning(f"Generated {len(result['slides'])} sections but {request.numSlides} were requested")
+
+            # Step 2: Route sections to appropriate visual generators
+            logger.info(f"Analyzing {len(result['slides'])} sections for visual routing...")
+
+            # Prepare sections for batch routing
+            slides_for_routing = [
+                {"title": slide["title"], "content": slide["content"]}
+                for slide in result["slides"]
+            ]
+
+            # Get visual routing results
+            visual_routes = await batch_route_slides(
+                slides=slides_for_routing,
+                subject=request.subject,
+                enable_paid_services=False
+            )
+
+            # Step 3: Generate actual visuals for routed sections
+            logger.info(f"Generating visuals for sections...")
+            visual_results = await batch_generate_visuals(
+                slides=slides_for_routing,
+                visual_routes=visual_routes,
+                subject=request.subject
+            )
+
+            # Step 4: Combine everything - text content + visual metadata + generated visuals
+            enriched_slides = []
+            for slide_data, visual_route, visual_result in zip(result["slides"], visual_routes, visual_results):
+                # Create visual metadata with generated visual data
+                visual_metadata = None
+                if visual_route.get('visualType') and visual_result.get('success'):
+                    # Merge routing info with generated visual
+                    visual_config = visual_route.get('visualConfig', {})
+                    visual_config['generatedData'] = visual_result.get('data', {})
+
+                    visual_metadata = VisualMetadata(
+                        visualType=visual_route['visualType'],
+                        visualConfig=visual_config,
+                        confidence=visual_route.get('confidence'),
+                        generatedBy=visual_route.get('generatedBy'),
+                        reasoning=visual_route.get('reasoning')
+                    )
+
+                slide = Slide(
+                    title=slide_data["title"],
+                    content=slide_data["content"],
+                    order=slide_data["order"],
+                    visualMetadata=visual_metadata
+                )
+                enriched_slides.append(slide)
+
+            # Log statistics
+            visuals_generated = sum(1 for r in visual_results if r.get('success'))
+            logger.info(f"Topic generation complete: {len(enriched_slides)} sections, "
+                       f"{visuals_generated} visuals generated successfully")
+
+            return DeckGenerateResponseLegacy(
+                title=result["title"],
+                slides=enriched_slides
+            )
 
     except Exception as e:
         logger.error(f"Topic generation failed: {str(e)}")

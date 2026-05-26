@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from app.models.schemas import QuizGenerateRequest, QuizGenerateResponse
-from app.services.openai_service import generate_json_completion
+from app.services.openai_service import generate_json_completion, llm_request_context
 from app.services.prompt_policy import difficulty_contract
 
 router = APIRouter()
@@ -9,19 +9,20 @@ router = APIRouter()
 async def generate_quiz(request: QuizGenerateRequest):
     """Generate interactive quiz questions"""
     try:
-        # DEFENSIVE: Ensure all string fields are actually strings
-        topic = str(request.topic) if request.topic else ""
-        subject = str(request.subject) if request.subject else ""
-        classLevel = str(request.classLevel) if request.classLevel else ""
-        chapter = str(request.chapter) if request.chapter else ""
-        count = int(request.count) if request.count else 5
-        additional_instructions = str(request.additionalInstructions) if request.additionalInstructions else ""
-        
-        system_message = """You are generating curriculum-aligned quiz items.
+        with llm_request_context(request.aiProvider, request.aiModel):
+            # DEFENSIVE: Ensure all string fields are actually strings
+            topic = str(request.topic) if request.topic else ""
+            subject = str(request.subject) if request.subject else ""
+            classLevel = str(request.classLevel) if request.classLevel else ""
+            chapter = str(request.chapter) if request.chapter else ""
+            count = int(request.count) if request.count else 5
+            additional_instructions = str(request.additionalInstructions) if request.additionalInstructions else ""
+
+            system_message = """You are generating curriculum-aligned quiz items.
 Use measurable instructional constraints instead of vague style adjectives.
 Your output must be strictly valid JSON."""
 
-        prompt = f"""Generate {count} interactive quiz questions for the following context:
+            prompt = f"""Generate {count} interactive quiz questions for the following context:
 - Subject: {subject}
 - Class/Grade: {classLevel}
 - Chapter: {chapter}
@@ -54,15 +55,15 @@ INTEGRATED CHALLENGE:
 """
 
         # Add teacher's additional instructions if provided
-        if additional_instructions:
-            prompt += f"""
+            if additional_instructions:
+                prompt += f"""
 ADDITIONAL TEACHER INSTRUCTIONS:
 {additional_instructions}
 
 Please incorporate these instructions into your question generation.
 """
 
-        prompt += """
+            prompt += """
 OUTPUT JSON FORMAT:
 {{
     "questions": [
@@ -78,14 +79,14 @@ OUTPUT JSON FORMAT:
 }}
 """
 
-        result = await generate_json_completion(
-            prompt=prompt,
-            system_message=system_message,
-            max_tokens=1400,
-            temperature=0.25
-        )
+            result = await generate_json_completion(
+                prompt=prompt,
+                system_message=system_message,
+                max_tokens=1400,
+                temperature=0.25
+            )
 
-        return QuizGenerateResponse(**result)
+            return QuizGenerateResponse(**result)
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to generate quiz: {str(e)}")

@@ -37,6 +37,8 @@ class LessonPlanGenerateRequest(BaseModel):
     topics: List[str]
     subject: str
     gradeLevel: str
+    aiProvider: Optional[str] = None
+    aiModel: Optional[str] = None
     classDuration: int = 45  # Duration per class period in minutes
     # AI will determine number of sessions based on topic count and complexity
 
@@ -111,6 +113,8 @@ class LessonPlanGenerateResponse(BaseModel):
 class DoubtRequest(BaseModel):
     question: str
     subject: Optional[str] = None
+    aiProvider: Optional[str] = None
+    aiModel: Optional[str] = None
     gradeLevel: Optional[str] = None  # Student's grade for age-appropriate answers
 
 
@@ -124,6 +128,8 @@ class DoubtResponse(BaseModel):
 class FollowUpRequest(BaseModel):
     originalQuestion: str
     followUpQuestion: str
+    aiProvider: Optional[str] = None
+    aiModel: Optional[str] = None
     previousContext: Optional[str] = None
 
 class FollowUpResponse(BaseModel):
@@ -171,6 +177,8 @@ class QuizGenerateRequest(BaseModel):
     subject: str
     chapter: str
     topic: str
+    aiProvider: Optional[str] = None
+    aiModel: Optional[str] = None
     count: Optional[int] = 5
     additionalInstructions: Optional[str] = None  # Custom instructions from teacher
 

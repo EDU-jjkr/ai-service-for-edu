@@ -227,6 +227,97 @@ def test_generate_deck_preserves_extra_outliner_structure():
     assert body["slides"][1]["objective"] == "Objective 2"
 
 
+def test_generate_complete_deck_respects_requested_num_slides():
+    client = TestClient(app)
+    planned_slides = [
+        Slide(title="Hook", content="placeholder", order=1, slideType="INTRODUCTION"),
+        Slide(title="Explain", content="placeholder", order=2, slideType="CONCEPT"),
+        Slide(title="Practice", content="placeholder", order=3, slideType="ACTIVITY"),
+        Slide(title="Summary", content="placeholder", order=4, slideType="SUMMARY"),
+    ]
+    outliner_mock = AsyncMock(return_value=[
+        {
+            "title": "Hook",
+            "slideType": "INTRODUCTION",
+            "bloom_level": "REMEMBER",
+            "objective": "Objective 1",
+        },
+        {
+            "title": "Explain",
+            "slideType": "CONCEPT",
+            "bloom_level": "UNDERSTAND",
+            "objective": "Objective 2",
+        },
+        {
+            "title": "Practice",
+            "slideType": "ACTIVITY",
+            "bloom_level": "APPLY",
+            "objective": "Objective 3",
+        },
+        {
+            "title": "Summary",
+            "slideType": "SUMMARY",
+            "bloom_level": "CREATE",
+            "objective": "Objective 4",
+        },
+    ])
+
+    with patch("app.agents.deck_agents.OutlinerAgent.create_outline", new=outliner_mock), \
+         patch("app.agents.deck_agents.ContentAgent.generate_all_slides_parallel", new=AsyncMock(return_value=[
+             {
+                 "title": "Hook",
+                 "content": "Generated content 1",
+                 "order": 1,
+                 "slideType": "INTRODUCTION",
+                 "bloom_level": "REMEMBER",
+                 "speakerNotes": "Notes 1",
+                 "imageQuery": None,
+                 "objective": "Objective 1",
+             },
+             {
+                 "title": "Explain",
+                 "content": "Generated content 2",
+                 "order": 2,
+                 "slideType": "CONCEPT",
+                 "bloom_level": "UNDERSTAND",
+                 "speakerNotes": "Notes 2",
+                 "imageQuery": None,
+                 "objective": "Objective 2",
+             },
+             {
+                 "title": "Summary",
+                 "content": "Generated content 3",
+                 "order": 3,
+                 "slideType": "SUMMARY",
+                 "bloom_level": "CREATE",
+                 "speakerNotes": "Notes 3",
+                 "imageQuery": None,
+                 "objective": "Objective 3",
+             },
+         ])), \
+         patch("app.routers.deck.build_lesson_narrative_plan"), \
+         patch("app.routers.deck.build_structured_slides_from_plan", return_value=planned_slides), \
+         patch("app.routers.deck.batch_route_slides", new=AsyncMock(return_value=[{}, {}, {}])), \
+         patch("app.routers.deck.batch_generate_visuals", new=AsyncMock(return_value=[{"success": False}, {"success": False}, {"success": False}])):
+        response = client.post(
+            "/api/deck/generate-complete",
+            json={
+                "topic": "Gymnosperms",
+                "subject": "Biology",
+                "gradeLevel": "11",
+                "structuredFormat": True,
+                "theme": "default",
+                "numSlides": 3,
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    assert outliner_mock.await_args.kwargs["target_slide_count"] == 3
+    body = response.json()
+    assert len(body["slides"]) == 3
+    assert body["slides"][-1]["slideType"] == "SUMMARY"
+
+
 def test_generate_all_levels_handles_slide_objects_without_dict_access():
     client = TestClient(app)
     planned_slide = Slide(

@@ -20,6 +20,7 @@ class OutlinerAgent:
         topic: str,
         subject: str,
         grade_level: str,
+        target_slide_count: Optional[int] = None,
         prompt_bundle: Optional[PromptBundle] = None,
     ) -> List[Dict[str, str]]:
         """
@@ -89,6 +90,8 @@ Return a JSON object with a 'slides' key containing a list of slide outlines."""
         if standards:
             system_message = rag.inject_into_prompt(standards, system_message)
 
+        requested_slide_count = max(3, int(target_slide_count or 10))
+
         base_prompt = f"""Create a lesson outline for:
 Topic: {topic}
 Subject: {subject}
@@ -97,7 +100,7 @@ Curriculum: {curriculum}
 
 CRITICAL INSTRUCTION: If the topic is broad, first identify 3-4 key sub-topics and structure the lesson around them.
 
-Generate 12-18 slides that progress through Bloom's Taxonomy levels with INTERLEAVED PRACTICE.
+Generate exactly {requested_slide_count} slides that progress through Bloom's Taxonomy levels with INTERLEAVED PRACTICE.
 
 For each slide provide:
 - 'title': The slide title
@@ -138,10 +141,17 @@ MANDATORY REQUIREMENTS:
             result = await generate_json_completion(
                 prompt=prompt,
                 system_message=system_message,
-                max_tokens=1200
+                max_tokens=1800
             )
             
             slides = result.get("slides", [])
+            if len(slides) > requested_slide_count:
+                summary_slides = [slide for slide in slides if str(slide.get("slideType", "")).upper() == "SUMMARY"]
+                non_summary_slides = [slide for slide in slides if str(slide.get("slideType", "")).upper() != "SUMMARY"]
+                if summary_slides and requested_slide_count > 1:
+                    slides = non_summary_slides[: requested_slide_count - 1] + [summary_slides[-1]]
+                else:
+                    slides = slides[:requested_slide_count]
             
             # Validate Bloom's progression
             OutlinerAgent._validate_bloom_progression(slides)

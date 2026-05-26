@@ -217,6 +217,8 @@ class DeckGenerateRequest(BaseModel):
     topic: Optional[str] = None  # Backward compatibility for single topic
     subject: str
     gradeLevel: str
+    aiProvider: Optional[str] = None
+    aiModel: Optional[str] = None
     chapter: Optional[str] = None  # Chapter name from curriculum
     numSlides: int = 10
     structuredFormat: Optional[bool] = False  # Use structured format (Def -> Details -> Q1 -> Q2 -> Q3)

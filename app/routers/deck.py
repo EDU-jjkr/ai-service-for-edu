@@ -3,7 +3,7 @@ from fastapi.responses import StreamingResponse
 from app.models.schemas import DeckGenerateRequest, DeckGenerateResponse, Slide, VisualMetadata, PPTXRenderRequest
 from app.models.modify_schemas import DeckModifyRequest
 from app.models.lesson_schema import LessonDeck, LessonMetadata, LearningStructure, LearningObjective, BloomLevel, SlideType, PedagogicalRole, ContentMode, DensityLevel, ImportanceLevel, VisualIntent, EditingHints, PracticeMetadata, ContentBlock
-from app.services.openai_service import generate_json_completion
+from app.services.openai_service import generate_json_completion, llm_request_context
 from app.services.deck_schema_builder import build_structured_slides_from_plan, expand_structured_slides_to_outline
 from app.services.lesson_narrative_planner import build_lesson_narrative_plan
 from app.services.pedagogy_flows import select_pedagogy_flow
@@ -12,14 +12,16 @@ from app.services.visual_generator import batch_generate_visuals
 from app.services.pptx_renderer import PPTXRenderer
 from app.services.slide_quality import apply_quality_guards_to_lesson
 from app.services.prompt_stack import build_lesson_planner_prompt, build_slide_author_prompt
+from app.services.openai_service import get_active_ai_settings
 import logging
 import json
 import asyncio
 from pydantic import BaseModel
-from typing import Any, Optional
+from typing import Any, Optional, Callable, TypeVar
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+T = TypeVar("T")
 
 # Subject Classification Helper
 def classify_subject(subject: str) -> str:
@@ -208,7 +210,6 @@ class DeckRegenerateClusterRequest(BaseModel):
     subject: str
     gradeLevel: str
     currentDeck: dict[str, Any]
-    theme: Optional[str] = None
 
 
 def _slide_match_key(slide: dict[str, Any]) -> tuple[Any, ...]:
@@ -255,7 +256,6 @@ async def _build_modified_deck_response(
     feedback: str,
     subject: str,
     grade_level: str,
-    theme: Optional[str] = None,
 ) -> DeckGenerateResponse:
     current_deck_json = json.dumps(current_deck, indent=2)
 
@@ -359,7 +359,7 @@ async def _build_modified_deck_response(
         topic=(result.get("lesson", {}) or {}).get("meta", {}).get("topic") or result.get("title") or current_deck.get("title") or "Modified Deck",
         subject=subject,
         grade_level=grade_level,
-        theme=theme or (current_lesson.get("meta", {}) or {}).get("theme", "default"),
+        theme=(current_lesson.get("meta", {}) or {}).get("theme", "default"),
         meta=result.get("meta") or current_lesson.get("meta"),
         structure=result.get("structure") or current_lesson.get("structure"),
         fallback_slides=fallback_slides,
@@ -383,6 +383,28 @@ def _build_structured_slide_shell(request: DeckGenerateRequest) -> list[Slide]:
         subject=request.subject,
         grade_level=request.gradeLevel,
     )
+
+
+def _limit_payload_to_target_count(
+    items: list[T],
+    target_count: int,
+    *,
+    is_summary: Callable[[T], bool],
+) -> list[T]:
+    if target_count <= 0 or len(items) <= target_count:
+        return items
+
+    if target_count == 1:
+        summary_item = next((item for item in reversed(items) if is_summary(item)), None)
+        return [summary_item] if summary_item is not None else items[:1]
+
+    summary_items = [item for item in items if is_summary(item)]
+    non_summary_items = [item for item in items if not is_summary(item)]
+
+    if summary_items:
+        return non_summary_items[: target_count - 1] + [summary_items[-1]]
+
+    return items[:target_count]
 
 
 def _merge_generated_content_into_structured_slides(
@@ -428,10 +450,21 @@ async def _generate_planned_lesson_deck(request: DeckGenerateRequest) -> LessonD
         topic=topic,
         subject=request.subject,
         grade_level=request.gradeLevel,
+        target_slide_count=request.numSlides,
         prompt_bundle=planner_prompt,
     )
 
     structured_slides = _build_structured_slide_shell(request)
+    structured_slides = _limit_payload_to_target_count(
+        structured_slides,
+        request.numSlides,
+        is_summary=lambda slide: slide.slideType == SlideType.SUMMARY,
+    )
+    outline = _limit_payload_to_target_count(
+        outline,
+        request.numSlides,
+        is_summary=lambda slide: str(slide.get("slideType", "")).upper() == "SUMMARY",
+    )
     structured_slides = expand_structured_slides_to_outline(structured_slides, outline)
     generation_outline = ContentAgent.build_generation_outline(
         structured_slides=structured_slides,
@@ -638,7 +671,6 @@ async def regenerate_cluster(request: DeckRegenerateClusterRequest):
             feedback=feedback,
             subject=request.subject,
             grade_level=request.gradeLevel,
-            theme=request.theme,
         )
     except Exception as e:
         logger.error(f"Cluster regeneration failed: {str(e)}")
@@ -649,21 +681,22 @@ async def regenerate_cluster(request: DeckRegenerateClusterRequest):
 async def generate_deck(request: DeckGenerateRequest):
     """Generate a teaching deck using AI with structured topic sequence"""
     try:
-        topics_list = request.topics if request.topics else [request.topic] if request.topic else []
-        if not topics_list:
-            raise HTTPException(status_code=400, detail="No topics provided")
+        with llm_request_context(request.aiProvider, request.aiModel):
+            topics_list = request.topics if request.topics else [request.topic] if request.topic else []
+            if not topics_list:
+                raise HTTPException(status_code=400, detail="No topics provided")
 
-        topics_list = [str(topic) for topic in topics_list if topic]
+            topics_list = [str(topic) for topic in topics_list if topic]
 
-        if request.structuredFormat or len(topics_list) > 1:
-            lesson_deck = await _generate_planned_lesson_deck(request)
-        else:
-            lesson_deck = await _generate_legacy_lesson_deck(request, topics_list)
+            if request.structuredFormat or len(topics_list) > 1:
+                lesson_deck = await _generate_planned_lesson_deck(request)
+            else:
+                lesson_deck = await _generate_legacy_lesson_deck(request, topics_list)
 
-        return _build_response(
-            lesson_deck,
-            title=request.topic or ", ".join(str(topic) for topic in topics_list if topic),
-        )
+            return _build_response(
+                lesson_deck,
+                title=request.topic or ", ".join(str(topic) for topic in topics_list if topic),
+            )
 
     except Exception as e:
         logger.error(f"Deck generation failed: {str(e)}")
@@ -677,41 +710,42 @@ async def generate_deck_pptx(request: DeckGenerateRequest):
     This replaces the old logic with the new Bloom's-aligned agents.
     """
     try:
-        logger.info(f"[PPTX EXPORT] Starting for topic: {request.topic or request.topics}")
-        topics_list = request.topics if request.topics else [request.topic] if request.topic else []
-        topics_list = [str(topic) for topic in topics_list if topic]
-        if not topics_list:
-            raise HTTPException(status_code=400, detail="No topics provided")
+        with llm_request_context(request.aiProvider, request.aiModel):
+            logger.info(f"[PPTX EXPORT] Starting for topic: {request.topic or request.topics}")
+            topics_list = request.topics if request.topics else [request.topic] if request.topic else []
+            topics_list = [str(topic) for topic in topics_list if topic]
+            if not topics_list:
+                raise HTTPException(status_code=400, detail="No topics provided")
 
-        from app.models.lesson_schema import DifferentiationLevel
+            from app.models.lesson_schema import DifferentiationLevel
 
-        if request.structuredFormat or len(topics_list) > 1:
-            lesson_deck = await _generate_planned_lesson_deck(request)
-        else:
-            lesson_deck = await _generate_legacy_lesson_deck(request, topics_list)
+            if request.structuredFormat or len(topics_list) > 1:
+                lesson_deck = await _generate_planned_lesson_deck(request)
+            else:
+                lesson_deck = await _generate_legacy_lesson_deck(request, topics_list)
 
-        # Step 3.5: Differentiate if requested
-        if request.level and request.level != DifferentiationLevel.CORE:
-            logger.info(f"[PPTX EXPORT] Differentiating to level: {request.level}")
-            from app.services.differentiation import DifferentiationService
-            diff_service = DifferentiationService()
-            lesson_deck = await diff_service.generate_differentiated_deck(
-                core_deck=lesson_deck,
-                target_level=request.level
+            # Step 3.5: Differentiate if requested
+            if request.level and request.level != DifferentiationLevel.CORE:
+                logger.info(f"[PPTX EXPORT] Differentiating to level: {request.level}")
+                from app.services.differentiation import DifferentiationService
+                diff_service = DifferentiationService()
+                lesson_deck = await diff_service.generate_differentiated_deck(
+                    core_deck=lesson_deck,
+                    target_level=request.level
+                )
+
+            lesson_deck = apply_quality_guards_to_lesson(lesson_deck)
+
+            # Step 4: Render to PPTX
+            renderer = PPTXRenderer(theme=request.theme)
+            pptx_file = await renderer.render_lesson_deck(lesson_deck)
+
+            filename = f"{request.topic or 'lesson'}_{request.level or 'core'}.pptx".replace(' ', '_')
+            return StreamingResponse(
+                pptx_file,
+                media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                headers={"Content-Disposition": f"attachment; filename={filename}"}
             )
-
-        lesson_deck = apply_quality_guards_to_lesson(lesson_deck)
-        
-        # Step 4: Render to PPTX
-        renderer = PPTXRenderer(theme=request.theme)
-        pptx_file = await renderer.render_lesson_deck(lesson_deck)
-        
-        filename = f"{request.topic or 'lesson'}_{request.level or 'core'}.pptx".replace(' ', '_')
-        return StreamingResponse(
-            pptx_file,
-            media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-            headers={"Content-Disposition": f"attachment; filename={filename}"}
-        )
         
     except Exception as e:
         logger.error(f"PPTX export failed: {str(e)}")
@@ -755,43 +789,56 @@ async def generate_complete_deck(request: DeckGenerateRequest):
         StreamingResponse with .pptx file
     """
     try:
-        logger.info(f"[COMPLETE PIPELINE] Starting for topic: {request.topic or request.topics}")
-        lesson_deck = await _generate_planned_lesson_deck(request)
+        with llm_request_context(request.aiProvider, request.aiModel):
+            active_provider, active_model = get_active_ai_settings(
+                request.aiProvider,
+                request.aiModel,
+                json_mode=True,
+            )
+            logger.info(
+                "[COMPLETE PIPELINE] Provider routing resolved: requested_provider=%s requested_model=%s resolved_provider=%s resolved_model=%s",
+                request.aiProvider or "default",
+                request.aiModel or "default",
+                active_provider,
+                active_model,
+            )
+            logger.info(f"[COMPLETE PIPELINE] Starting for topic: {request.topic or request.topics}")
+            lesson_deck = await _generate_planned_lesson_deck(request)
 
-        level_value = request.level.value if hasattr(request.level, 'value') else str(request.level) if request.level else 'CORE'
-        level_value = level_value.upper()
-        logger.info(f"[DEBUG] Checking differentiation - level_value: {level_value}")
+            level_value = request.level.value if hasattr(request.level, 'value') else str(request.level) if request.level else 'CORE'
+            level_value = level_value.upper()
+            logger.info(f"[DEBUG] Checking differentiation - level_value: {level_value}")
 
-        if level_value != 'CORE':
-            logger.info(f"[Step 4/4] Applying differentiation for level: {level_value}")
-            try:
-                from app.services.differentiation import DifferentiationService, DifferentiationLevel as DiffLevel
-                diff_service = DifferentiationService()
+            if level_value != 'CORE':
+                logger.info(f"[Step 4/4] Applying differentiation for level: {level_value}")
+                try:
+                    from app.services.differentiation import DifferentiationService, DifferentiationLevel as DiffLevel
+                    diff_service = DifferentiationService()
 
-                level_map = {
-                    'SUPPORT': DiffLevel.SUPPORT,
-                    'EXTENSION': DiffLevel.EXTENSION,
-                }
-                target_level = level_map.get(level_value)
+                    level_map = {
+                        'SUPPORT': DiffLevel.SUPPORT,
+                        'EXTENSION': DiffLevel.EXTENSION,
+                    }
+                    target_level = level_map.get(level_value)
 
-                if target_level:
-                    lesson_deck = await diff_service.generate_differentiated_deck(
-                        core_deck=lesson_deck,
-                        target_level=target_level
-                    )
-                    logger.info(f"✓ Differentiation applied: {len(lesson_deck.slides)} slides for {level_value}")
-                else:
-                    logger.warning(f"Unknown level '{level_value}', using core slides")
-            except Exception as diff_error:
-                logger.warning(f"Differentiation failed, returning core: {str(diff_error)}")
-                import traceback
-                logger.error(traceback.format_exc())
-        else:
-            logger.info("[Step 4/4] Level is CORE, skipping differentiation")
+                    if target_level:
+                        lesson_deck = await diff_service.generate_differentiated_deck(
+                            core_deck=lesson_deck,
+                            target_level=target_level
+                        )
+                        logger.info(f"✓ Differentiation applied: {len(lesson_deck.slides)} slides for {level_value}")
+                    else:
+                        logger.warning(f"Unknown level '{level_value}', using core slides")
+                except Exception as diff_error:
+                    logger.warning(f"Differentiation failed, returning core: {str(diff_error)}")
+                    import traceback
+                    logger.error(traceback.format_exc())
+            else:
+                logger.info("[Step 4/4] Level is CORE, skipping differentiation")
 
-        level_suffix = f" ({level_value})" if level_value != 'CORE' else ""
-        title = (request.topic or ", ".join(request.topics) if request.topics else "Teaching Deck") + level_suffix
-        return _serialize_lesson_deck_payload(lesson_deck, title=title)
+            level_suffix = f" ({level_value})" if level_value != 'CORE' else ""
+            title = (request.topic or ", ".join(request.topics) if request.topics else "Teaching Deck") + level_suffix
+            return _serialize_lesson_deck_payload(lesson_deck, title=title)
         
     except Exception as e:
         logger.error(f"[COMPLETE PIPELINE] ❌ Failed: {str(e)}")
@@ -818,47 +865,48 @@ async def generate_all_differentiation_levels(request: DeckGenerateRequest):
         }
     """
     try:
-        logger.info(f"[DIFFERENTIATION] Generating all levels for: {request.topic or request.topics}")
-        
-        # Step 1: Generate CORE deck using planner-driven pipeline
-        logger.info("[Step 1/3] Generating CORE deck...")
-        from app.services.differentiation import DifferentiationService, DifferentiationLevel
-        core_deck = await _generate_planned_lesson_deck(request)
-        
-        logger.info(f"✓ CORE deck created: {len(core_deck.slides)} slides")
-        
-        # Step 2: Generate SUPPORT and EXTENSION in parallel
-        logger.info("[Step 2/3] Generating SUPPORT and EXTENSION versions (parallel)...")
-        
-        diff_service = DifferentiationService()
-        
-        support_task = diff_service.generate_differentiated_deck(
-            core_deck=core_deck,
-            target_level=DifferentiationLevel.SUPPORT
-        )
-        
-        extension_task = diff_service.generate_differentiated_deck(
-            core_deck=core_deck,
-            target_level=DifferentiationLevel.EXTENSION
-        )
-        
-        support_deck, extension_deck = await asyncio.gather(support_task, extension_task)
-        
-        logger.info(f"✓ SUPPORT deck: {len(support_deck.slides)} slides")
-        logger.info(f"✓ EXTENSION deck: {len(extension_deck.slides)} slides")
-        
-        # Step 3: Return all three versions as JSON
-        logger.info("[Step 3/3] Returning all versions...")
-        
-        result = {
-            "support": support_deck.dict(),
-            "core": core_deck.dict(),
-            "extension": extension_deck.dict()
-        }
-        
-        logger.info("[DIFFERENTIATION] ✅ All levels generated successfully")
-        
-        return result
+        with llm_request_context(request.aiProvider, request.aiModel):
+            logger.info(f"[DIFFERENTIATION] Generating all levels for: {request.topic or request.topics}")
+
+            # Step 1: Generate CORE deck using planner-driven pipeline
+            logger.info("[Step 1/3] Generating CORE deck...")
+            from app.services.differentiation import DifferentiationService, DifferentiationLevel
+            core_deck = await _generate_planned_lesson_deck(request)
+
+            logger.info(f"✓ CORE deck created: {len(core_deck.slides)} slides")
+
+            # Step 2: Generate SUPPORT and EXTENSION in parallel
+            logger.info("[Step 2/3] Generating SUPPORT and EXTENSION versions (parallel)...")
+
+            diff_service = DifferentiationService()
+
+            support_task = diff_service.generate_differentiated_deck(
+                core_deck=core_deck,
+                target_level=DifferentiationLevel.SUPPORT
+            )
+
+            extension_task = diff_service.generate_differentiated_deck(
+                core_deck=core_deck,
+                target_level=DifferentiationLevel.EXTENSION
+            )
+
+            support_deck, extension_deck = await asyncio.gather(support_task, extension_task)
+
+            logger.info(f"✓ SUPPORT deck: {len(support_deck.slides)} slides")
+            logger.info(f"✓ EXTENSION deck: {len(extension_deck.slides)} slides")
+
+            # Step 3: Return all three versions as JSON
+            logger.info("[Step 3/3] Returning all versions...")
+
+            result = {
+                "support": support_deck.dict(),
+                "core": core_deck.dict(),
+                "extension": extension_deck.dict()
+            }
+
+            logger.info("[DIFFERENTIATION] ✅ All levels generated successfully")
+
+            return result
         
     except Exception as e:
         logger.error(f"[DIFFERENTIATION] ❌ Failed: {str(e)}")
@@ -881,40 +929,41 @@ async def generate_specific_level(
         LessonDeck at the specified level
     """
     try:
-        # Normalize level input
-        level_map = {
-            "support": "SUPPORT",
-            "core": "CORE",
-            "extension": "EXTENSION"
-        }
-        
-        target_level_str = level_map.get(level.lower())
-        if not target_level_str:
-            raise HTTPException(status_code=400, detail=f"Invalid level: {level}. Must be support, core, or extension")
-        
-        from app.services.differentiation import DifferentiationLevel
-        target_level = DifferentiationLevel(target_level_str)
-        
-        logger.info(f"[LEVEL GENERATION] Generating {target_level} deck...")
-        
-        # If CORE, use standard pipeline
-        if target_level == DifferentiationLevel.CORE:
-            return await generate_complete_deck(request)
-        
-        # Otherwise, generate core first then differentiate
-        from app.services.differentiation import DifferentiationService
-        core_deck = await _generate_planned_lesson_deck(request)
-        
-        diff_service = DifferentiationService()
-        differentiated_deck = await diff_service.generate_differentiated_deck(
-            core_deck=core_deck,
-            target_level=target_level
-        )
-        
-        logger.info(f"✓ {target_level} deck generated with {len(differentiated_deck.slides)} slides")
-        
-        title = f"{request.topic or ', '.join(request.topics)} ({target_level.value})"
-        return _serialize_lesson_deck_payload(differentiated_deck, title=title)
+        with llm_request_context(request.aiProvider, request.aiModel):
+            # Normalize level input
+            level_map = {
+                "support": "SUPPORT",
+                "core": "CORE",
+                "extension": "EXTENSION"
+            }
+
+            target_level_str = level_map.get(level.lower())
+            if not target_level_str:
+                raise HTTPException(status_code=400, detail=f"Invalid level: {level}. Must be support, core, or extension")
+
+            from app.services.differentiation import DifferentiationLevel
+            target_level = DifferentiationLevel(target_level_str)
+
+            logger.info(f"[LEVEL GENERATION] Generating {target_level} deck...")
+
+            # If CORE, use standard pipeline
+            if target_level == DifferentiationLevel.CORE:
+                return await generate_complete_deck(request)
+
+            # Otherwise, generate core first then differentiate
+            from app.services.differentiation import DifferentiationService
+            core_deck = await _generate_planned_lesson_deck(request)
+
+            diff_service = DifferentiationService()
+            differentiated_deck = await diff_service.generate_differentiated_deck(
+                core_deck=core_deck,
+                target_level=target_level
+            )
+
+            logger.info(f"✓ {target_level} deck generated with {len(differentiated_deck.slides)} slides")
+
+            title = f"{request.topic or ', '.join(request.topics)} ({target_level.value})"
+            return _serialize_lesson_deck_payload(differentiated_deck, title=title)
         
     except Exception as e:
         logger.error(f"[LEVEL GENERATION] Failed: {str(e)}")
