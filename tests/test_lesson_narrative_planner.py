@@ -136,9 +136,7 @@ def test_generate_deck_uses_planner_driven_structured_slides():
              "objective": "Objective",
          }])), \
          patch("app.routers.deck.build_lesson_narrative_plan") as planner_mock, \
-         patch("app.routers.deck.build_structured_slides_from_plan", return_value=[planned_slide]) as builder_mock, \
-         patch("app.routers.deck.batch_route_slides", new=AsyncMock(return_value=[{}])), \
-         patch("app.routers.deck.batch_generate_visuals", new=AsyncMock(return_value=[{"success": False}])):
+         patch("app.routers.deck.build_structured_slides_from_plan", return_value=[planned_slide]) as builder_mock:
         response = client.post(
             "/api/deck/generate-deck",
             json={
@@ -206,9 +204,7 @@ def test_generate_deck_preserves_extra_outliner_structure():
              },
          ])), \
          patch("app.routers.deck.build_lesson_narrative_plan"), \
-         patch("app.routers.deck.build_structured_slides_from_plan", return_value=[planned_slide]), \
-         patch("app.routers.deck.batch_route_slides", new=AsyncMock(return_value=[{}, {}])), \
-         patch("app.routers.deck.batch_generate_visuals", new=AsyncMock(return_value=[{"success": False}, {"success": False}])):
+         patch("app.routers.deck.build_structured_slides_from_plan", return_value=[planned_slide]):
         response = client.post(
             "/api/deck/generate-deck",
             json={
@@ -247,8 +243,6 @@ def test_generate_all_levels_handles_slide_objects_without_dict_access():
          patch("app.agents.deck_agents.ContentAgent.generate_all_slides_parallel", new=AsyncMock(return_value=[generated_slide])), \
          patch("app.routers.deck.build_lesson_narrative_plan"), \
          patch("app.routers.deck.build_structured_slides_from_plan", return_value=[planned_slide]), \
-         patch("app.routers.deck.batch_route_slides", new=AsyncMock(return_value=[{}])), \
-         patch("app.routers.deck.batch_generate_visuals", new=AsyncMock(return_value=[{"success": False}])), \
          patch("app.services.differentiation.DifferentiationService.generate_differentiated_deck", new=AsyncMock(side_effect=lambda core_deck, target_level: core_deck)):
         response = client.post(
             "/api/deck/generate-all-levels",

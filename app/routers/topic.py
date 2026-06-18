@@ -2,8 +2,6 @@ from fastapi import APIRouter, HTTPException
 from app.models.schemas import DeckGenerateRequest, DeckGenerateResponseLegacy, Slide, VisualMetadata
 from app.models.modify_schemas import DeckModifyRequest
 from app.services.openai_service import generate_json_completion
-from app.services.visual_routing import batch_route_slides
-from app.services.visual_generator import batch_generate_visuals
 import logging
 import json
 
@@ -154,60 +152,16 @@ Generate the complete {request.numSlides}-section topic outline now. Make it eng
         if len(result["slides"]) != request.numSlides:
             logger.warning(f"Generated {len(result['slides'])} sections but {request.numSlides} were requested")
 
-        # Step 2: Route sections to appropriate visual generators
-        logger.info(f"Analyzing {len(result['slides'])} sections for visual routing...")
-        
-        # Prepare sections for batch routing
-        slides_for_routing = [
-            {"title": slide["title"], "content": slide["content"]}
-            for slide in result["slides"]
-        ]
-        
-        # Get visual routing results
-        visual_routes = await batch_route_slides(
-            slides=slides_for_routing,
-            subject=request.subject,
-            enable_paid_services=False
-        )
-
-        # Step 3: Generate actual visuals for routed sections
-        logger.info(f"Generating visuals for sections...")
-        visual_results = await batch_generate_visuals(
-            slides=slides_for_routing,
-            visual_routes=visual_routes,
-            subject=request.subject
-        )
-
-        # Step 4: Combine everything - text content + visual metadata + generated visuals
-        enriched_slides = []
-        for slide_data, visual_route, visual_result in zip(result["slides"], visual_routes, visual_results):
-            # Create visual metadata with generated visual data
-            visual_metadata = None
-            if visual_route.get('visualType') and visual_result.get('success'):
-                # Merge routing info with generated visual
-                visual_config = visual_route.get('visualConfig', {})
-                visual_config['generatedData'] = visual_result.get('data', {})
-                
-                visual_metadata = VisualMetadata(
-                    visualType=visual_route['visualType'],
-                    visualConfig=visual_config,
-                    confidence=visual_route.get('confidence'),
-                    generatedBy=visual_route.get('generatedBy'),
-                    reasoning=visual_route.get('reasoning')
-                )
-            
-            slide = Slide(
+        enriched_slides = [
+            Slide(
                 title=slide_data["title"],
                 content=slide_data["content"],
                 order=slide_data["order"],
-                visualMetadata=visual_metadata
             )
-            enriched_slides.append(slide)
-        
-        # Log statistics
-        visuals_generated = sum(1 for r in visual_results if r.get('success'))
-        logger.info(f"Topic generation complete: {len(enriched_slides)} sections, "
-                   f"{visuals_generated} visuals generated successfully")
+            for slide_data in result["slides"]
+        ]
+
+        logger.info(f"Topic generation complete: {len(enriched_slides)} sections")
 
         return DeckGenerateResponseLegacy(
             title=result["title"],
@@ -255,52 +209,14 @@ async def modify_topic(request: DeckModifyRequest):
             temperature=0.7
         )
         
-        # Regenerate visuals for the modified topic
-        logger.info(f"Regenerating visuals for modified topic with {len(result.get('slides', []))} sections")
-        
-        # Prepare sections for visual routing
-        slides_for_routing = [
-            {"title": slide["title"], "content": slide["content"]}
-            for slide in result.get("slides", [])
-        ]
-        
-        # Get visual routing results
-        visual_routes = await batch_route_slides(
-            slides=slides_for_routing,
-            subject=request.subject,
-            enable_paid_services=False
-        )
-
-        # Generate actual visuals
-        visual_results = await batch_generate_visuals(
-            slides=slides_for_routing,
-            visual_routes=visual_routes,
-            subject=request.subject
-        )
-
-        # Combine text content + visual metadata
-        updated_slides = []
-        for slide_data, visual_route, visual_result in zip(result.get("slides", []), visual_routes, visual_results):
-            # Create visual metadata if visual was generated
-            visual_metadata = None
-            if visual_route.get('visualType') and visual_result.get('success'):
-                visual_config = visual_route.get('visualConfig', {})
-                visual_config['generatedData'] = visual_result.get('data', {})
-                
-                visual_metadata = VisualMetadata(
-                    visualType=visual_route['visualType'],
-                    visualConfig=visual_config,
-                    confidence=visual_route.get('confidence'),
-                    generatedBy=visual_route.get('generatedBy'),
-                    reasoning=visual_route.get('reasoning')
-                )
-            
-            updated_slides.append(Slide(
+        updated_slides = [
+            Slide(
                 title=slide_data.get("title", "Untitled"),
                 content=slide_data.get("content", ""),
                 order=slide_data.get("order", 0),
-                visualMetadata=visual_metadata
-            ))
+            )
+            for slide_data in result.get("slides", [])
+        ]
 
         return DeckGenerateResponseLegacy(
             title=result.get("title", request.currentDeck.get("title")),

@@ -64,9 +64,7 @@ def test_generate_complete_deck_passes_requested_pedagogy_flow_to_planner():
              "objective": "Objective",
          }])), \
          patch("app.routers.deck.build_lesson_narrative_plan") as planner_mock, \
-         patch("app.routers.deck.build_structured_slides_from_plan", return_value=[planned_slide]), \
-         patch("app.routers.deck.batch_route_slides", new=AsyncMock(return_value=[{}])), \
-         patch("app.routers.deck.batch_generate_visuals", new=AsyncMock(return_value=[{"success": False}])):
+         patch("app.routers.deck.build_structured_slides_from_plan", return_value=[planned_slide]):
         response = client.post(
             "/api/deck/generate-complete",
             json={

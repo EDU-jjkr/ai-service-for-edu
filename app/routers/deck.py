@@ -7,8 +7,6 @@ from app.services.openai_service import generate_json_completion
 from app.services.deck_schema_builder import build_structured_slides_from_plan, expand_structured_slides_to_outline
 from app.services.lesson_narrative_planner import build_lesson_narrative_plan
 from app.services.pedagogy_flows import select_pedagogy_flow
-from app.services.visual_routing import batch_route_slides
-from app.services.visual_generator import batch_generate_visuals
 from app.services.pptx_renderer import PPTXRenderer
 from app.services.slide_quality import apply_quality_guards_to_lesson
 from app.services.prompt_stack import build_lesson_planner_prompt, build_slide_author_prompt
@@ -20,6 +18,80 @@ from typing import Any, Optional
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _visual_metadata_from_spec(visual_spec: dict | None) -> VisualMetadata | None:
+    """Convert a visualSpec dict (produced by ContentAgent) into a VisualMetadata object."""
+    if not visual_spec:
+        return None
+
+    vtype = visual_spec.get("type", "none")
+
+    if vtype == "mermaid":
+        code = (visual_spec.get("mermaidCode") or "").strip()
+        if not code:
+            return None
+        return VisualMetadata(
+            visualType="diagram",
+            visualConfig={
+                "generatedData": {
+                    "code": code,
+                    "diagramType": visual_spec.get("diagramType") or "flowchart",
+                    "description": "",
+                }
+            },
+            generatedBy="mermaid",
+            confidence=90.0,
+            reasoning="Generated in-context by content agent",
+        )
+
+    if vtype == "chart":
+        labels = visual_spec.get("labels") or []
+        values = visual_spec.get("values") or []
+        if not labels or not values or len(labels) < 2:
+            return None
+        chart_type = visual_spec.get("chartType") or "bar"
+        data_points = [{"label": str(l), "value": v} for l, v in zip(labels, values)]
+        from app.services.chart_generator import _build_chart_config, _generate_quickchart_url
+        chart_config = _build_chart_config("", chart_type, data_points)
+        quick_url = _generate_quickchart_url(chart_config, chart_type)
+        return VisualMetadata(
+            visualType="chart",
+            visualConfig={
+                "generatedData": {
+                    "config": chart_config,
+                    "chartType": chart_type,
+                    "quickChartUrl": quick_url,
+                    "dataPoints": data_points,
+                }
+            },
+            generatedBy="chartjs",
+            confidence=85.0,
+            reasoning="Generated in-context by content agent",
+        )
+
+    if vtype == "math":
+        equations = visual_spec.get("equations") or []
+        equations = [e for e in equations if isinstance(e, str) and e.strip()]
+        if not equations:
+            return None
+        display_mode = "block" if len(equations) <= 3 else "inline"
+        return VisualMetadata(
+            visualType="math",
+            visualConfig={
+                "generatedData": {
+                    "equations": equations,
+                    "displayMode": display_mode,
+                }
+            },
+            generatedBy="latex",
+            confidence=90.0,
+            reasoning="Generated in-context by content agent",
+        )
+
+    # stock_photo and none: no VisualMetadata (imageQuery is stored on the slide directly)
+    return None
+
 
 # Subject Classification Helper
 def classify_subject(subject: str) -> str:
@@ -208,7 +280,6 @@ class DeckRegenerateClusterRequest(BaseModel):
     subject: str
     gradeLevel: str
     currentDeck: dict[str, Any]
-    theme: Optional[str] = None
 
 
 def _slide_match_key(slide: dict[str, Any]) -> tuple[Any, ...]:
@@ -255,7 +326,6 @@ async def _build_modified_deck_response(
     feedback: str,
     subject: str,
     grade_level: str,
-    theme: Optional[str] = None,
 ) -> DeckGenerateResponse:
     current_deck_json = json.dumps(current_deck, indent=2)
 
@@ -288,47 +358,20 @@ async def _build_modified_deck_response(
         temperature=0.7
     )
 
-    slides_for_routing = [
-        {"title": slide["title"], "content": slide["content"]}
-        for slide in result.get("slides", [])
-    ]
-
-    visual_routes = await batch_route_slides(
-        slides=slides_for_routing,
-        subject=subject,
-        enable_paid_services=False
-    )
-
-    visual_results = await batch_generate_visuals(
-        slides=slides_for_routing,
-        visual_routes=visual_routes,
-        subject=subject
-    )
-
     fallback_slides = []
     current_lesson = current_deck.get("lesson", {})
     current_lesson_slides = current_lesson.get("slides", [])
 
-    for index, (slide_data, visual_route, visual_result) in enumerate(zip(result.get("slides", []), visual_routes, visual_results)):
+    for index, slide_data in enumerate(result.get("slides", [])):
         fallback_slide_data = _find_fallback_slide(
             slide_data=slide_data,
             index=index,
             current_lesson_slides=current_lesson_slides,
         )
-        visual_metadata = None
-        if visual_route.get('visualType') and visual_result.get('success'):
-            visual_config = visual_route.get('visualConfig', {})
-            visual_config['generatedData'] = visual_result.get('data', {})
-
-            visual_metadata = VisualMetadata(
-                visualType=visual_route['visualType'],
-                visualConfig=visual_config,
-                confidence=visual_route.get('confidence'),
-                generatedBy=visual_route.get('generatedBy'),
-                reasoning=visual_route.get('reasoning')
-            )
-        elif fallback_slide_data.get("visualMetadata"):
-            visual_metadata = fallback_slide_data.get("visualMetadata")
+        # Preserve existing visualMetadata from the original slide; the modify
+        # path does not regenerate visuals — content changes are what matter.
+        raw_vm = slide_data.get("visualMetadata") or fallback_slide_data.get("visualMetadata")
+        visual_metadata = VisualMetadata(**raw_vm) if isinstance(raw_vm, dict) else raw_vm
 
         fallback_slides.append(Slide(
             id=slide_data.get("id") or fallback_slide_data.get("id"),
@@ -359,7 +402,7 @@ async def _build_modified_deck_response(
         topic=(result.get("lesson", {}) or {}).get("meta", {}).get("topic") or result.get("title") or current_deck.get("title") or "Modified Deck",
         subject=subject,
         grade_level=grade_level,
-        theme=theme or (current_lesson.get("meta", {}) or {}).get("theme", "default"),
+        theme=(current_lesson.get("meta", {}) or {}).get("theme", "default"),
         meta=result.get("meta") or current_lesson.get("meta"),
         structure=result.get("structure") or current_lesson.get("structure"),
         fallback_slides=fallback_slides,
@@ -470,34 +513,10 @@ async def _generate_planned_lesson_deck(request: DeckGenerateRequest) -> LessonD
         generated_slide_payloads=generated_slide_payloads,
     )
 
-    slides_for_visuals = [
-        {"title": slide.title, "content": slide.content}
-        for slide in slide_objects
-    ]
-    visual_routes = await batch_route_slides(
-        slides=slides_for_visuals,
-        subject=request.subject,
-        enable_paid_services=False,
-    )
-    visual_results = await batch_generate_visuals(
-        slides=slides_for_visuals,
-        visual_routes=visual_routes,
-        subject=request.subject,
-    )
-
-    for slide_obj, visual_route, visual_result in zip(slide_objects, visual_routes, visual_results):
-        if not visual_route.get("visualType") or not visual_result.get("success"):
-            continue
-
-        visual_config = dict(visual_route.get("visualConfig") or {})
-        visual_config["generatedData"] = visual_result.get("data", {})
-        slide_obj.visualMetadata = VisualMetadata(
-            visualType=visual_route.get("visualType"),
-            visualConfig=visual_config,
-            confidence=visual_route.get("confidence"),
-            generatedBy=visual_route.get("generatedBy"),
-            reasoning=visual_route.get("reasoning"),
-        )
+    for slide_obj, payload in zip(slide_objects, generated_slide_payloads):
+        visual_metadata = _visual_metadata_from_spec(payload.get("visualSpec"))
+        if visual_metadata:
+            slide_obj.visualMetadata = visual_metadata
 
     learning_objectives = [
         LearningObjective(
@@ -539,9 +558,9 @@ async def _generate_legacy_lesson_deck(
         temperature=0.7,
     )
 
-    slides_for_routing = []
-    for slide in result.get("slides", []):
-        content = slide.get("content", "")
+    fallback_slides = []
+    for slide_data in result.get("slides", []):
+        content = slide_data.get("content", "")
         if isinstance(content, list):
             content = "\n".join(str(item) for item in content)
         elif isinstance(content, dict):
@@ -549,44 +568,11 @@ async def _generate_legacy_lesson_deck(
         elif not isinstance(content, str):
             content = str(content)
 
-        slides_for_routing.append(
-            {
-                "title": slide.get("title", ""),
-                "content": content,
-            }
-        )
-
-    visual_routes = await batch_route_slides(
-        slides=slides_for_routing,
-        subject=request.subject,
-        enable_paid_services=False,
-    )
-    visual_results = await batch_generate_visuals(
-        slides=slides_for_routing,
-        visual_routes=visual_routes,
-        subject=request.subject,
-    )
-
-    fallback_slides = []
-    for slide_data, visual_route, visual_result in zip(result.get("slides", []), visual_routes, visual_results):
-        visual_metadata = None
-        if visual_route.get("visualType") and visual_result.get("success"):
-            visual_config = dict(visual_route.get("visualConfig") or {})
-            visual_config["generatedData"] = visual_result.get("data", {})
-            visual_metadata = VisualMetadata(
-                visualType=visual_route.get("visualType"),
-                visualConfig=visual_config,
-                confidence=visual_route.get("confidence"),
-                generatedBy=visual_route.get("generatedBy"),
-                reasoning=visual_route.get("reasoning"),
-            )
-
         fallback_slides.append(
             Slide(
                 title=slide_data.get("title", "Untitled"),
-                content=slide_data.get("content", ""),
+                content=content,
                 order=slide_data.get("order", 0),
-                visualMetadata=visual_metadata,
             )
         )
 
@@ -598,8 +584,6 @@ async def _generate_legacy_lesson_deck(
         theme=request.theme,
         fallback_slides=fallback_slides,
     )
-
-# ... (generate_deck function stays here, simplified for brevity in this replace block if not editing it) ...
 
 @router.post("/modify-deck", response_model=DeckGenerateResponse)
 async def modify_deck(request: DeckModifyRequest):
@@ -638,7 +622,6 @@ async def regenerate_cluster(request: DeckRegenerateClusterRequest):
             feedback=feedback,
             subject=request.subject,
             grade_level=request.gradeLevel,
-            theme=request.theme,
         )
     except Exception as e:
         logger.error(f"Cluster regeneration failed: {str(e)}")

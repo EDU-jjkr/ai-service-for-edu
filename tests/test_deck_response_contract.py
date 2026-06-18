@@ -39,9 +39,7 @@ class DeckResponseContractTests(unittest.TestCase):
             ],
         }
 
-        with patch("app.routers.deck.generate_json_completion", new=AsyncMock(return_value=ai_result)), \
-             patch("app.routers.deck.batch_route_slides", new=AsyncMock(return_value=[{}])), \
-             patch("app.routers.deck.batch_generate_visuals", new=AsyncMock(return_value=[{"success": False}])):
+        with patch("app.routers.deck.generate_json_completion", new=AsyncMock(return_value=ai_result)):
             response = self.client.post("/api/deck/generate-deck", json=payload)
 
         self.assertEqual(response.status_code, 200, response.text)
@@ -81,9 +79,7 @@ class DeckResponseContractTests(unittest.TestCase):
             ],
         }
 
-        with patch("app.routers.deck.generate_json_completion", new=AsyncMock(return_value=ai_result)), \
-             patch("app.routers.deck.batch_route_slides", new=AsyncMock(return_value=[{}])), \
-             patch("app.routers.deck.batch_generate_visuals", new=AsyncMock(return_value=[{"success": False}])):
+        with patch("app.routers.deck.generate_json_completion", new=AsyncMock(return_value=ai_result)):
             response = self.client.post("/api/deck/modify-deck", json=payload)
 
         self.assertEqual(response.status_code, 200, response.text)
@@ -158,9 +154,7 @@ class DeckResponseContractTests(unittest.TestCase):
             ],
         }
 
-        with patch("app.routers.deck.generate_json_completion", new=AsyncMock(return_value=ai_result)), \
-             patch("app.routers.deck.batch_route_slides", new=AsyncMock(return_value=[{}, {}])), \
-             patch("app.routers.deck.batch_generate_visuals", new=AsyncMock(return_value=[{"success": False}, {"success": False}])):
+        with patch("app.routers.deck.generate_json_completion", new=AsyncMock(return_value=ai_result)):
             response = self.client.post("/api/deck/regenerate-cluster", json=payload)
 
         self.assertEqual(response.status_code, 200, response.text)
@@ -225,9 +219,7 @@ class DeckResponseContractTests(unittest.TestCase):
             ],
         }
 
-        with patch("app.routers.deck.generate_json_completion", new=AsyncMock(return_value=ai_result)), \
-             patch("app.routers.deck.batch_route_slides", new=AsyncMock(return_value=[{}])), \
-             patch("app.routers.deck.batch_generate_visuals", new=AsyncMock(return_value=[{"success": False}])):
+        with patch("app.routers.deck.generate_json_completion", new=AsyncMock(return_value=ai_result)):
             response = self.client.post("/api/deck/modify-deck", json=payload)
 
         self.assertEqual(response.status_code, 200, response.text)
