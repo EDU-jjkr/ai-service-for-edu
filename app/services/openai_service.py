@@ -38,6 +38,44 @@ async def generate_completion(
         raise Exception(f"OpenAI API error: {str(e)}")
 
 
+import re
+
+def _clean_json_string(content: str) -> str:
+    if not content:
+        return ""
+    content = content.strip()
+    if content.startswith("```"):
+        lines = content.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].startswith("```"):
+            lines = lines[:-1]
+        content = "\n".join(lines).strip()
+    return content
+
+
+def _extract_json_payload(content: str) -> str:
+    cleaned = _clean_json_string(content)
+    if not cleaned:
+        return ""
+    try:
+        json.loads(cleaned)
+        return cleaned
+    except json.JSONDecodeError:
+        pass
+    
+    match = re.search(r'(\{[\s\S]*\})', cleaned)
+    if match:
+        possible = match.group(1)
+        try:
+            json.loads(possible)
+            return possible
+        except json.JSONDecodeError:
+            pass
+
+    return cleaned
+
+
 async def generate_json_completion(
     prompt: str,
     system_message: str = "You are a helpful AI assistant. Always respond with valid JSON.",
@@ -57,12 +95,22 @@ async def generate_json_completion(
             max_completion_tokens=max_tokens,
             response_format={"type": "json_object"},
         )
-        content = response.choices[0].message.content
+        choice = response.choices[0] if response.choices else None
+        content = choice.message.content if choice and choice.message else ""
+        finish_reason = choice.finish_reason if choice else "unknown"
+
+        cleaned_content = _extract_json_payload(content or "")
+
+        if not cleaned_content:
+            print(f"Empty OpenAI Content! finish_reason={finish_reason}, raw_content={repr(content)}")
+            raise Exception(f"OpenAI returned empty response (finish_reason: {finish_reason})")
+
         try:
-            return json.loads(content)
+            return json.loads(cleaned_content)
         except json.JSONDecodeError as json_err:
             print(f"JSON Parse Error: {str(json_err)}")
             print(f"Raw Content: {content}")
+            print(f"Cleaned Content: {cleaned_content}")
             raise Exception(f"Failed to parse JSON response: {str(json_err)}")
     except Exception as e:
         raise Exception(f"OpenAI API error: {str(e)}")

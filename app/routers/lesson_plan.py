@@ -404,8 +404,6 @@ same length, nothing else."""
                 fixed = await generate_json_completion(
                     prompt=fix_prompt,
                     system_message="You rewrite vague learning objectives into measurable ones. Respond with a JSON array only.",
-                    max_tokens=800,
-                    temperature=0.3,
                 )
                 if isinstance(fixed, list) and len(fixed) == len(all_objs):
                     fixed_iter = iter(fixed)

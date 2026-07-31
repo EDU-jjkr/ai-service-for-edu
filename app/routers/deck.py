@@ -991,8 +991,6 @@ Return JSON:
         result = await generate_json_completion(
             prompt=prompt,
             system_message=system_message,
-            max_tokens=1000,
-            temperature=0.7
         )
         
         logger.info(f"✓ Activity generated: {result.get('title', 'Unknown')}")
@@ -1086,8 +1084,6 @@ Return JSON:
         result = await generate_json_completion(
             prompt=prompt,
             system_message=system_message,
-            max_tokens=1000,
-            temperature=0.7
         )
         
         logger.info(f"✓ Slide generated: {result.get('title', 'Unknown')}")

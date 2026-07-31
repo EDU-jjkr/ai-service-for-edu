@@ -81,8 +81,6 @@ OUTPUT JSON FORMAT:
         result = await generate_json_completion(
             prompt=prompt,
             system_message=system_message,
-            max_tokens=1400,
-            temperature=0.25
         )
 
         return QuizGenerateResponse(**result)
