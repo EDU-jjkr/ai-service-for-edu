@@ -8,55 +8,189 @@ from app.models.schemas import (
     CheckForUnderstanding,
     LessonSession,
     AssessmentPlan,
-    DifferentiationPlan
+    DifferentiationPlan,
+    ChunkBlock,
+    ReflectionPrompts,
 )
 from app.models.modify_schemas import LessonPlanModifyRequest
 from app.services.openai_service import generate_json_completion
+from pydantic import ValidationError
 import logging
-import math
+import re
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-@router.post("/generate-lesson-plan", response_model=LessonPlanGenerateResponse)
-async def generate_lesson_plan(request: LessonPlanGenerateRequest):
-    """Generate a complete multi-session lesson plan using AI"""
-    try:
-        # DEFENSIVE: Ensure all topics are strings and filter out empty ones
-        topics_list = [str(topic) for topic in request.topics if topic]
-        topics_str = ", ".join(topics_list)
-        num_topics = len(topics_list)
-        
-        # Calculate number of sessions based on topic count
-        # Rule: ~1-2 topics per session for thorough coverage
-        class_duration = request.classDuration
-        num_sessions = max(1, math.ceil(num_topics / 1.5))  # Avg 1.5 topics per session
-        total_duration = num_sessions * class_duration  # Calculate total based on sessions
-        
-        # Calculate time allocations per session using research-based lesson structure
-        intro_time = max(5, int(class_duration * 0.12))  # 12% for hook/intro
-        main_time = int(class_duration * 0.65)  # 65% for core instruction (I Do, We Do, You Do)
-        assessment_time = max(3, int(class_duration * 0.10))  # 10% for formative checks
-        closure_time = max(5, int(class_duration * 0.13))  # 13% for closure
-        
-        system_message = """You are a master educator and curriculum specialist with expertise in backward design, differentiated instruction, and evidence-based teaching practices. You have deep knowledge of learning standards, cognitive science, and classroom management.
+# ---------- CONSTANTS ----------
 
-Your lesson plans are known for:
-- Clear alignment between objectives, activities, and assessments
-- Strategic scaffolding using "I Do, We Do, You Do" methodology
-- Engaging hooks that capture student interest and activate prior knowledge
-- Differentiation strategies for diverse learners (struggling, advanced, IEP/ELL)
-- Practical, classroom-tested activities with smooth transitions
-- Efficient use of instructional time with realistic pacing
-- Formative assessment opportunities woven throughout
-- Clear closure activities that synthesize learning
+BANNED_VAGUE_VERBS = [
+    "understand", "understands", "understanding",
+    "know", "knows", "knowledge of",
+    "learn", "learns", "learning about",
+    "appreciate", "appreciates",
+    "be aware of", "be familiar with", "grasp the concept",
+]
 
-You design lessons that are immediately implementable by any qualified teacher, with enough detail to ensure quality instruction while allowing for teacher autonomy and adaptation.
+MAX_GENERATION_ATTEMPTS = 2
 
-Always respond with valid, comprehensive JSON that follows professional lesson planning standards."""
 
-        prompt = f"""Design a complete, professional-grade MULTI-SESSION lesson plan using backward design principles.
+# ---------- HELPERS ----------
+
+def attention_span_minutes(grade_level: str) -> int:
+    """Return a realistic single-chunk teaching span in minutes based on grade band.
+
+    Guideline used: primary ~12 min, middle ~17 min, senior ~22 min.
+    Falls back to middle-band if grade can't be parsed.
+    """
+    match = re.search(r"\d+", grade_level or "")
+    grade_num = int(match.group()) if match else 6
+
+    if grade_num <= 5:
+        return 12
+    elif grade_num <= 8:
+        return 17
+    else:
+        return 22
+
+
+def build_chunk_plan(main_time: int, grade_level: str) -> list[dict]:
+    """Split the core-instruction time into attention-span-sized chunks.
+
+    Each chunk gets a placeholder focus/checkIn the model is expected to
+    fill in via the prompt instructions — this function just fixes the
+    TIMING so the model can't default back to one long block.
+    """
+    span = attention_span_minutes(grade_level)
+    if main_time <= span:
+        return [{"order": 1, "duration": main_time}]
+
+    num_chunks = max(2, round(main_time / span))
+    base = main_time // num_chunks
+    remainder = main_time - base * num_chunks
+
+    chunks = []
+    for i in range(num_chunks):
+        duration = base + (1 if i < remainder else 0)
+        chunks.append({"order": i + 1, "duration": duration})
+    return chunks
+
+
+def contains_vague_objective(objectives: list[str]) -> bool:
+    text = " ".join(objectives).lower()
+    return any(verb in text for verb in BANNED_VAGUE_VERBS)
+
+
+def normalize_activity_durations(activities: list[LessonStep], target_duration: int) -> None:
+    """Rescale activity durations in place so they sum exactly to target_duration.
+
+    Proportional rescale + integer rounding, with any leftover minute(s)
+    assigned to the longest activity so the total is always exact.
+    """
+    if not activities:
+        return
+    current_total = sum(a.duration for a in activities)
+    if current_total == 0 or current_total == target_duration:
+        return
+
+    scale = target_duration / current_total
+    scaled = [max(1, round(a.duration * scale)) for a in activities]
+
+    diff = target_duration - sum(scaled)
+    if diff != 0:
+        longest_idx = max(range(len(scaled)), key=lambda i: scaled[i])
+        scaled[longest_idx] += diff
+        scaled[longest_idx] = max(1, scaled[longest_idx])
+
+    for activity, new_duration in zip(activities, scaled):
+        activity.duration = new_duration
+
+
+def parse_sessions(raw_sessions: list[dict], class_duration: int) -> list[LessonSession]:
+    sessions = []
+    for s in raw_sessions:
+        intro = SessionIntroduction(**s.get("introduction", {}))
+        activities = [LessonStep(**a) for a in s.get("activities", [])]
+        checks = [CheckForUnderstanding(**c) for c in s.get("checkForUnderstanding", [])]
+        chunk_plan = [ChunkBlock(**c) for c in s.get("chunkPlan", [])]
+
+        session_duration = s.get("duration", class_duration)
+        normalize_activity_durations(activities, session_duration)
+
+        session = LessonSession(
+            sessionNumber=s.get("sessionNumber", 1),
+            title=s.get("title", f"Session {s.get('sessionNumber', 1)}"),
+            duration=session_duration,
+            objectives=s.get("objectives", []),
+            introduction=intro,
+            activities=activities,
+            checkForUnderstanding=checks,
+            closure=s.get("closure", ""),
+            chunkPlan=chunk_plan,
+            backupPlan=s.get("backupPlan"),
+        )
+        sessions.append(session)
+    return sessions
+
+
+def build_prompt(request: LessonPlanGenerateRequest) -> tuple[str, str, dict]:
+    """Builds the system message, main prompt, and timing metadata."""
+    topics_list = [topic.name for topic in request.topics if topic.name]
+    topics_str = ", ".join(topics_list)
+    num_topics = len(topics_list)
+
+    num_sessions = sum(topic.periodsRequired for topic in request.topics) or 1
+    class_duration = request.classDuration
+    total_duration = num_sessions * class_duration
+
+    all_objectives = []
+    all_concepts = []
+    for t in request.topics:
+        all_objectives.extend(t.learningObjectives)
+        all_concepts.extend(t.keyConcepts)
+
+    objectives_str = "\n".join(f"- {obj}" for obj in all_objectives)
+    concepts_str = "\n".join(f"- {c}" for c in all_concepts)
+
+    intro_time = max(5, int(class_duration * 0.12))
+    main_time = int(class_duration * 0.65)
+    assessment_time = max(3, int(class_duration * 0.10))
+    closure_time = max(5, int(class_duration * 0.13))
+
+    span = attention_span_minutes(request.gradeLevel)
+    chunk_plan = build_chunk_plan(main_time, request.gradeLevel)
+    chunk_count = len(chunk_plan)
+
+    system_message = """You are a master educator and curriculum specialist with expertise in
+backward design, cognitive load management, and evidence-based teaching practices.
+
+Your core operating principle: a lesson plan exists to answer ONE question —
+"how will THIS group of students learn THIS topic today?" — not "how much
+content can I finish." You never optimize for content coverage over
+comprehension.
+
+You follow these non-negotiable rules:
+- Every objective is a measurable action (solve, compare, identify, construct,
+  critique, design...). You NEVER write objectives using "understand", "know",
+  "learn about", or "be aware of" — these are unmeasurable and banned.
+- One session, one primary objective. Supporting objectives are fine, but
+  never stack multiple unrelated learning goals into a single session.
+- Long explanation blocks are broken into short chunks matched to realistic
+  attention spans, each ending in a quick, specific check-in — never a single
+  unbroken lecture block.
+- Hooks are genuine curiosity triggers (a question, an odd object, a
+  surprising fact) — never "open your books to page X."
+- Examples are grounded in things students actually encounter (money, sport,
+  food, phones, weather) rather than abstract filler.
+- Homework is small and purposeful (aim for ~5 meaningful items), never bulk
+  repetition.
+- You always include a concrete backup plan for when technology fails or
+  timing runs short/long — because it eventually will.
+
+Always respond with valid, comprehensive JSON only — no prose outside the
+JSON structure."""
+
+    prompt = f"""Design a complete, professional-grade MULTI-SESSION lesson plan using backward design principles.
 
 LESSON SPECIFICATIONS:
 - Topics to Cover: {topics_str}
@@ -65,262 +199,262 @@ LESSON SPECIFICATIONS:
 - Class Period Duration: {class_duration} minutes per session
 - Number of Sessions Needed: {num_sessions} (based on {num_topics} topics to cover thoroughly)
 - Total Teaching Time: {total_duration} minutes
+- Realistic attention span for this grade band: ~{span} minutes per instructional chunk
 
-===== STAGE 1: DESIRED RESULTS (What should students learn?) =====
+===== STAGE 1: DESIRED RESULTS =====
 
-MASTER OBJECTIVES (for the entire unit):
-Create 3-5 SMART learning objectives using the SWBAT (Students Will Be Able To) format:
-- Start with measurable action verbs (Bloom's Taxonomy: analyze, evaluate, create, apply, compare, etc.)
-- Specific to topics: {topics_str}
-- Achievable within {num_sessions} class sessions
-- Target appropriate cognitive level for {request.gradeLevel}
+MASTER OBJECTIVES — use exactly these pre-approved curriculum objectives, do not invent new ones:
+{objectives_str}
 
-PREREQUISITES:
-List 2-4 things students should already know before starting this lesson.
+Each SESSION should organize around ONE primary objective drawn from the above list.
+If a session's objective can be phrased with "understand" or "know", REWRITE it as
+a measurable action instead (e.g. not "understand fractions" but "compare fractions
+with unlike denominators and solve at least 8/10 practice items correctly").
 
-===== STAGE 2: ASSESSMENT EVIDENCE (How will we know they learned?) =====
+PREREQUISITES: List 2-4 things students should already know before starting.
 
-FORMATIVE ASSESSMENTS (ongoing):
-- Design 2-3 quick checks to use DURING instruction
-- Examples: exit tickets, thumbs up/down, whiteboard responses, pair-share explains
+===== STAGE 2: ASSESSMENT EVIDENCE =====
 
-SUMMATIVE ASSESSMENT (end):
-- One comprehensive end-of-lesson/unit assessment
-- Could be: quiz, project, presentation, written response
+FORMATIVE (ongoing, 2-3 quick checks used DURING instruction — exit tickets,
+thumbs up/down, whiteboard response, pair-share).
 
-===== STAGE 3: LEARNING PLAN (How will we teach it?) =====
+SUMMATIVE (one comprehensive end-of-lesson/unit assessment).
 
-CONCEPT MAPPING:
-Identify {max(3, num_topics * 2)} key concepts across topics:
-- Each concept: unique ID, name, 1-2 sentence description
-- Order from foundational to advanced
+===== STAGE 3: LEARNING PLAN =====
 
-SESSION STRUCTURE (design {num_sessions} complete sessions):
+CONCEPT MAPPING — organize these pre-approved key concepts foundational-to-advanced:
+{concepts_str}
+Each concept: unique id, name, 1-2 sentence description.
 
-For EACH of the {num_sessions} sessions, create:
+SESSION STRUCTURE — design {num_sessions} complete sessions. For EACH session:
 
-**A. SESSION OBJECTIVES (2-3 per session)**
-- Specific SWBAT statements for just that session
-- Should build toward master objectives
+**A. SESSION OBJECTIVE** — one primary SWBAT statement (measurable verb, no
+banned words), optionally 1 supporting objective.
 
-**B. INTRODUCTION/HOOK (≈{intro_time} minutes)**
-Design an engaging opener with:
-- "hook": A thought-provoking question, short demo, video clip, surprising fact, or quick poll that captures attention
-- "priorKnowledge": How you'll activate what students already know (KWL, quick discussion, review question)
-- "agendaShare": Brief statement sharing today's learning target with students
+**B. INTRODUCTION/HOOK (~{intro_time} min)**
+- "hook": a specific curiosity trigger (question, object, surprising fact, short demo)
+- "priorKnowledge": how you'll surface what students already know
+- "agendaShare": the learning target in plain student-facing language
 
-**C. LEARNING ACTIVITIES (≈{main_time} minutes total)**
-Use the "I Do, We Do, You Do" structure:
+**C. CHUNKED CORE INSTRUCTION (~{main_time} min total, split into {chunk_count} chunks)**
+This session needs a "chunkPlan" array with exactly {chunk_count} entries. The
+durations are fixed below — you fill in "focus" (what slice of the objective
+this chunk teaches) and "checkIn" (the specific quick question/signal that
+ends the chunk, e.g. "thumbs up/down on whether X makes sense", "cold-call one
+student to restate Y"):
+{chunk_plan}
+Do not merge these into one long explanation — each chunk should feel like a
+distinct explain -> example -> quick-check unit ("I do" material lives here).
 
-1. "I Do" (Teacher models): 
-   - Direct instruction, demonstration, think-aloud
-   - Teacher shows exactly how to do the skill/concept
-   
-2. "We Do" (Guided practice):
-   - Students practice WITH teacher support
-   - Pair work, whole-class problem-solving, guided examples
-   
-3. "You Do" (Independent practice):
-   - Students work independently to demonstrate understanding
-   - Can include collaborative work with minimal teacher help
+**D. GUIDED + INDEPENDENT PRACTICE (folds into "activities" alongside the I Do
+chunks above)** — use "We Do" then "You Do":
+- "We Do": students practice WITH support (pair work, guided problems)
+- "You Do": students work independently to demonstrate understanding
+Include for at least the "You Do" activity a "difficultyNote" describing how
+the SAME task scales down for struggling learners and up for advanced ones
+(e.g. "Support: 2 fewer steps, denominators pre-matched. Extension: add a
+mixed-number case.").
+Give each activity: order, activity, duration, method, resources, notes,
+optional checkInPrompt, optional difficultyNote.
+All activity durations (chunk + practice combined) must sum to exactly
+{class_duration} minutes.
 
-Each activity must have:
-- order (1, 2, 3...)
-- activity (detailed description of what happens)
-- duration (in minutes - MUST sum to session duration)
-- method ("I Do", "We Do", "You Do", "Discussion", "Demonstration", etc.)
-- resources (specific materials needed)
-- notes (optional: key questions to ask, common mistakes to address)
+**E. CHECK FOR UNDERSTANDING (~{assessment_time} min)** — 2-3 formative checks:
+type, prompt, expectedResponse (optional).
 
-**D. CHECK FOR UNDERSTANDING (≈{assessment_time} minutes)**
-During and after activities, include 2-3 formative checks:
-- type: "questioning", "quick_quiz", "whiteboard", "verbal_summary", "exit_ticket", etc.
-- prompt: The specific question or task
-- expectedResponse: What a successful response looks like (optional)
+**F. CLOSURE (~{closure_time} min)** — summary of key points + one reflection
+question put back to students ("tell me one thing you learned today") +
+preview of next session if applicable.
 
-**E. CLOSURE (≈{closure_time} minutes)**
-Synthesize learning:
-- Quick summary of key points
-- Connection to next session or real-world application
-- Preview what's coming next (if not final session)
+**G. BACKUP PLAN** — one sentence: what to do if the tech fails, or this
+topic clearly needs more/less time than planned.
 
-===== DIFFERENTIATION STRATEGIES =====
+===== DIFFERENTIATION (unit-level) =====
+- support: 2-3 strategies for struggling learners
+- extension: 2-3 strategies for advanced learners
+- accommodations (optional): IEP/ELL specifics
 
-SUPPORT (for struggling learners):
-- 2-3 specific strategies (simplified materials, extra scaffolding, peer tutoring)
+===== POST-LESSON REFLECTION =====
+Generate a "reflectionPrompts" object anticipating (for the teacher to check
+after teaching): the point most likely to confuse students, which planned
+explanation is likely strongest, which question is likely to spark the most
+discussion, a question to verify the objective actually landed, and a prompt
+for what to change next time.
 
-EXTENSION (for advanced learners):
-- 2-3 challenge activities (deeper questions, additional complexity, independent research)
-
-ACCOMMODATIONS (for IEP/ELL students, optional):
-- Visual aids, modified assignments, extra time, etc.
-
-===== OUTPUT FORMAT (return as JSON) =====
+===== OUTPUT FORMAT (JSON) =====
 {{
-    "title": "Engaging, specific lesson title that captures the learning goal",
-    "objectives": [
-        "Students will be able to [master objective 1]",
-        "Students will be able to [master objective 2]",
-        "Students will be able to [master objective 3]"
-    ],
-    "prerequisites": [
-        "Understanding of [prior concept 1]",
-        "Ability to [prior skill]"
-    ],
-    "standards": ["Optional curriculum standard alignment"],
-    "concepts": [
-        {{
-            "id": "concept-1",
-            "name": "First Key Concept",
-            "description": "Clear explanation of this concept"
-        }}
-    ],
+    "title": "...",
+    "objectives": ["Students will be able to [measurable action]..."],
+    "prerequisites": ["..."],
+    "standards": ["optional"],
+    "concepts": [{{"id": "concept-1", "name": "...", "description": "..."}}],
     "sessions": [
         {{
             "sessionNumber": 1,
-            "title": "Session 1: [Focus of this session]",
+            "title": "...",
             "duration": {class_duration},
-            "objectives": [
-                "SWBAT [session-specific objective 1]",
-                "SWBAT [session-specific objective 2]"
+            "objectives": ["SWBAT ... (measurable, no banned verbs)"],
+            "introduction": {{"hook": "...", "priorKnowledge": "...", "agendaShare": "..."}},
+            "chunkPlan": [
+                {{"order": 1, "focus": "...", "duration": <int>, "checkIn": "..."}}
             ],
-            "introduction": {{
-                "hook": "Start with a surprising question: [specific question or activity]",
-                "priorKnowledge": "Ask students to recall [specific prior knowledge activation]",
-                "agendaShare": "Today we will learn to [learning target in student-friendly language]"
-            }},
             "activities": [
                 {{
                     "order": 1,
-                    "activity": "I Do: Teacher demonstrates [specific skill/concept]",
-                    "duration": 10,
+                    "activity": "I Do: ...",
+                    "duration": <int>,
                     "method": "I Do",
-                    "resources": ["Whiteboard", "Example problems"],
-                    "notes": "Key point to emphasize: [important note]"
+                    "resources": ["..."],
+                    "notes": "...",
+                    "checkInPrompt": "..."
                 }},
                 {{
                     "order": 2,
-                    "activity": "We Do: Work through [specific practice] together",
-                    "duration": 15,
+                    "activity": "We Do: ...",
+                    "duration": <int>,
                     "method": "We Do",
-                    "resources": ["Student handout", "Guided practice worksheet"],
-                    "notes": "Common mistake: [what to watch for]"
+                    "resources": ["..."],
+                    "notes": "..."
                 }},
                 {{
                     "order": 3,
-                    "activity": "You Do: Students independently [specific task]",
-                    "duration": 12,
+                    "activity": "You Do: ...",
+                    "duration": <int>,
                     "method": "You Do",
-                    "resources": ["Independent practice sheet"],
-                    "notes": "Circulate and provide individual feedback"
+                    "resources": ["..."],
+                    "difficultyNote": "Support: ... Extension: ..."
                 }}
             ],
             "checkForUnderstanding": [
-                {{
-                    "type": "questioning",
-                    "prompt": "Can someone explain [concept] in their own words?",
-                    "expectedResponse": "Students should mention [key elements]"
-                }},
-                {{
-                    "type": "whiteboard",
-                    "prompt": "Solve this quick problem: [example]",
-                    "expectedResponse": "Correct answer is [X]"
-                }}
+                {{"type": "questioning", "prompt": "...", "expectedResponse": "..."}}
             ],
-            "closure": "Today we learned [summary]. Tomorrow we will build on this by [preview]."
+            "closure": "...",
+            "backupPlan": "..."
         }}
     ],
-    "assessments": {{
-        "formative": [
-            "Quick check: [specific formative assessment strategy]",
-            "Exit ticket: [specific question or prompt]"
-        ],
-        "summative": "End-of-unit quiz covering [topics] with [format description]"
-    }},
-    "resources": [
-        "Specific resource 1 (with source if relevant)",
-        "Specific resource 2",
-        "Include 5-10 concrete, obtainable resources"
-    ],
-    "differentiation": {{
-        "support": [
-            "Provide graphic organizer for [concept]",
-            "Pair struggling students with peer tutors"
-        ],
-        "extension": [
-            "Challenge: Have students create their own [advanced task]",
-            "Research: Explore [deeper topic]"
-        ],
-        "accommodations": [
-            "Visual aids for ELL students",
-            "Extended time for written responses"
-        ]
+    "assessments": {{"formative": ["..."], "summative": "..."}},
+    "resources": ["5-10 concrete, obtainable resources"],
+    "differentiation": {{"support": ["..."], "extension": ["..."], "accommodations": ["..."]}},
+    "reflectionPrompts": {{
+        "mostConfusingPoint": "...",
+        "strongestExplanation": "...",
+        "likelyDiscussionSpark": "...",
+        "objectiveCheckQuestion": "...",
+        "suggestedRevision": "..."
     }},
     "totalSessions": {num_sessions},
     "totalDuration": {total_duration}
 }}
 
 ===== QUALITY STANDARDS =====
-✓ Each session's activity durations MUST sum to exactly {class_duration} minutes
-✓ All activities connect to stated objectives
-✓ Include at least one "I Do", "We Do", and "You Do" per session
-✓ Formative checks are specific and actionable
-✓ Resources are realistic and accessible
-✓ Transitions between activities are logical
+✓ NO objective anywhere uses "understand", "know", "learn about", "be aware of"
+✓ Each session activity durations sum to EXACTLY {class_duration} minutes
+✓ Core instruction is chunked into {chunk_count} pieces per session, never one block
+✓ At least one "I Do", "We Do", "You Do" per session
+✓ Hooks are specific curiosity triggers, never "open your book to page X"
+✓ Homework/practice stays small and purposeful, never bulk repetition
+✓ Every session has a backupPlan
 ✓ Appropriate for {request.gradeLevel} students
 ✓ Covers all topics: {topics_str}
 
-Generate the complete {num_sessions}-session lesson plan now. Make it detailed, professional, and immediately usable for classroom instruction."""
+Generate the complete {num_sessions}-session lesson plan now."""
 
-        result = await generate_json_completion(
-            prompt=prompt,
-            system_message=system_message,
-            max_tokens=4000,  # Max supported by model
-            temperature=0.6
-        )
+    timing = {
+        "num_sessions": num_sessions,
+        "class_duration": class_duration,
+        "total_duration": total_duration,
+    }
+    return system_message, prompt, timing
 
-        # Transform and validate response
-        concepts = [Concept(**c) for c in result.get("concepts", [])]
-        
-        sessions = []
-        for s in result.get("sessions", []):
-            intro = SessionIntroduction(**s.get("introduction", {}))
-            activities = [LessonStep(**a) for a in s.get("activities", [])]
-            checks = [CheckForUnderstanding(**c) for c in s.get("checkForUnderstanding", [])]
-            
-            session = LessonSession(
-                sessionNumber=s.get("sessionNumber", 1),
-                title=s.get("title", f"Session {s.get('sessionNumber', 1)}"),
-                duration=s.get("duration", class_duration),
-                objectives=s.get("objectives", []),
-                introduction=intro,
-                activities=activities,
-                checkForUnderstanding=checks,
-                closure=s.get("closure", "")
+
+async def generate_and_validate(system_message: str, prompt: str, class_duration: int) -> dict:
+    """Calls the LLM, validates against Pydantic models, retries once on failure,
+    and runs a targeted re-prompt if banned vague verbs slip into objectives."""
+    last_error = None
+    for attempt in range(1, MAX_GENERATION_ATTEMPTS + 1):
+        try:
+            result = await generate_json_completion(
+                prompt=prompt,
+                system_message=system_message,
+                max_tokens=32768,
+                temperature=0.6,
             )
-            sessions.append(session)
-        
-        # Validate timing for each session
-        for session in sessions:
-            session_time = sum(step.duration for step in session.activities)
-            if abs(session_time - session.duration) > 10:  # Allow 10 min variance
-                logger.warning(f"Session {session.sessionNumber} duration mismatch: activities={session_time}, expected={session.duration}")
 
-        # Build assessment plan
+            # Validate shape early so we fail fast and retry rather than
+            # discovering a broken field deep in the response-building code.
+            _ = parse_sessions(result.get("sessions", []), class_duration)
+
+            # Targeted fix for vague objectives instead of a full regeneration.
+            all_objs = list(result.get("objectives", []))
+            for s in result.get("sessions", []):
+                all_objs.extend(s.get("objectives", []))
+
+            if contains_vague_objective(all_objs):
+                logger.info("Vague objective detected, requesting targeted rewrite")
+                fix_prompt = f"""The following learning objectives use vague,
+unmeasurable verbs (understand/know/learn about/be aware of). Rewrite ONLY
+these into measurable actions (compare, solve, construct, critique, design,
+identify, explain-with-example, etc.), keeping the same topic and meaning.
+
+Objectives to fix:
+{all_objs}
+
+Return ONLY a JSON array of the rewritten objectives, in the same order,
+same length, nothing else."""
+                fixed = await generate_json_completion(
+                    prompt=fix_prompt,
+                    system_message="You rewrite vague learning objectives into measurable ones. Respond with a JSON array only.",
+                    max_tokens=800,
+                    temperature=0.3,
+                )
+                if isinstance(fixed, list) and len(fixed) == len(all_objs):
+                    fixed_iter = iter(fixed)
+                    result["objectives"] = [next(fixed_iter) for _ in result.get("objectives", [])]
+                    for s in result.get("sessions", []):
+                        s["objectives"] = [next(fixed_iter) for _ in s.get("objectives", [])]
+                else:
+                    logger.warning("Objective rewrite response shape mismatch, keeping originals")
+
+            return result
+
+        except (ValidationError, KeyError, TypeError) as e:
+            last_error = e
+            logger.warning(f"Generation attempt {attempt} failed validation: {e}")
+
+    raise HTTPException(
+        status_code=500,
+        detail=f"Failed to generate a valid lesson plan after {MAX_GENERATION_ATTEMPTS} attempts: {last_error}",
+    )
+
+
+# ---------- ROUTES ----------
+
+@router.post("/generate-lesson-plan", response_model=LessonPlanGenerateResponse)
+async def generate_lesson_plan(request: LessonPlanGenerateRequest):
+    """Generate a complete multi-session lesson plan using AI."""
+    try:
+        system_message, prompt, timing = build_prompt(request)
+        result = await generate_and_validate(system_message, prompt, timing["class_duration"])
+
+        concepts = [Concept(**c) for c in result.get("concepts", [])]
+        sessions = parse_sessions(result.get("sessions", []), timing["class_duration"])
+
         assessments_data = result.get("assessments", {})
         assessments = AssessmentPlan(
             formative=assessments_data.get("formative", []),
-            summative=assessments_data.get("summative", "End-of-lesson assessment")
+            summative=assessments_data.get("summative", "End-of-lesson assessment"),
         )
-        
-        # Build differentiation plan
+
         diff_data = result.get("differentiation", {})
         differentiation = DifferentiationPlan(
             support=diff_data.get("support", []),
             extension=diff_data.get("extension", []),
-            accommodations=diff_data.get("accommodations")
+            accommodations=diff_data.get("accommodations"),
         )
-        
+
+        reflection_data = result.get("reflectionPrompts")
+        reflection = ReflectionPrompts(**reflection_data) if reflection_data else None
+
         return LessonPlanGenerateResponse(
             title=result.get("title", "Lesson Plan"),
             objectives=result.get("objectives", []),
@@ -331,84 +465,74 @@ Generate the complete {num_sessions}-session lesson plan now. Make it detailed, 
             assessments=assessments,
             resources=result.get("resources", []),
             differentiation=differentiation,
+            reflectionPrompts=reflection,
             totalSessions=len(sessions),
-            totalDuration=sum(s.duration for s in sessions)
+            totalDuration=sum(s.duration for s in sessions),
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Lesson plan generation failed: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to generate lesson plan: {str(e)}")
 
+
 @router.post("/modify-lesson-plan", response_model=LessonPlanGenerateResponse)
 async def modify_lesson_plan(request: LessonPlanModifyRequest):
-    """Modify an existing lesson plan based on user feedback"""
+    """Modify an existing lesson plan based on user feedback."""
     try:
         import json
         current_plan_json = json.dumps(request.currentPlan, indent=2)
-        
-        system_message = """You are an expert curriculum specialist revising a multi-session lesson plan.
-        Apply the user's feedback to the provided JSON lesson plan. 
-        Maintain the strict JSON structure with sessions, activities, checkForUnderstanding, etc.
-        Return the FULL updated plan with all sessions."""
+
+        system_message = """You are an expert curriculum specialist revising a multi-session
+lesson plan. Apply the user's feedback to the provided JSON lesson plan while
+preserving every quality rule the plan was originally built with: measurable
+objectives only (no "understand/know/learn about"), chunked instruction
+matched to attention span, exact activity-duration sums, a backupPlan per
+session, and a reflectionPrompts object. Maintain the strict JSON structure.
+Return the FULL updated plan with all sessions."""
 
         prompt = f"""REVISE THIS MULTI-SESSION LESSON PLAN.
 
-        CONTEXT:
-        Subject: {request.subject}
-        Grade: {request.gradeLevel}
+CONTEXT:
+Subject: {request.subject}
+Grade: {request.gradeLevel}
 
-        USER FEEDBACK:
-        "{request.feedback}"
+USER FEEDBACK:
+"{request.feedback}"
 
-        CURRENT PLAN JSON:
-        {current_plan_json}
+CURRENT PLAN JSON:
+{current_plan_json}
 
-        OUTPUT FORMAT: Valid JSON matching the original schema with sessions, differentiation, assessments, etc.
-        Preserve the multi-session structure.
-        """
+OUTPUT FORMAT: Valid JSON matching the original schema (sessions, chunkPlan,
+differentiation, assessments, reflectionPrompts, backupPlan, etc.). Preserve
+the multi-session structure and all quality rules above.
+"""
 
-        result = await generate_json_completion(
-            prompt=prompt,
-            system_message=system_message,
-            max_tokens=4000,
-            temperature=0.6
-        )
+        class_duration = 45
+        if request.currentPlan.get("sessions"):
+            class_duration = request.currentPlan["sessions"][0].get("duration", 45)
 
-        # Transform and validate response
+        result = await generate_and_validate(system_message, prompt, class_duration)
+
         concepts = [Concept(**c) for c in result.get("concepts", [])]
-        
-        sessions = []
-        for s in result.get("sessions", []):
-            intro = SessionIntroduction(**s.get("introduction", {}))
-            activities = [LessonStep(**a) for a in s.get("activities", [])]
-            checks = [CheckForUnderstanding(**c) for c in s.get("checkForUnderstanding", [])]
-            
-            session = LessonSession(
-                sessionNumber=s.get("sessionNumber", 1),
-                title=s.get("title", f"Session {s.get('sessionNumber', 1)}"),
-                duration=s.get("duration", 45),
-                objectives=s.get("objectives", []),
-                introduction=intro,
-                activities=activities,
-                checkForUnderstanding=checks,
-                closure=s.get("closure", "")
-            )
-            sessions.append(session)
+        sessions = parse_sessions(result.get("sessions", []), class_duration)
 
-        # Build assessment plan
         assessments_data = result.get("assessments", {})
         assessments = AssessmentPlan(
             formative=assessments_data.get("formative", []),
-            summative=assessments_data.get("summative", "End-of-lesson assessment")
+            summative=assessments_data.get("summative", "End-of-lesson assessment"),
         )
-        
-        # Build differentiation plan
+
         diff_data = result.get("differentiation", {})
         differentiation = DifferentiationPlan(
             support=diff_data.get("support", []),
             extension=diff_data.get("extension", []),
-            accommodations=diff_data.get("accommodations")
+            accommodations=diff_data.get("accommodations"),
         )
+
+        reflection_data = result.get("reflectionPrompts")
+        reflection = ReflectionPrompts(**reflection_data) if reflection_data else None
 
         return LessonPlanGenerateResponse(
             title=result.get("title", "Updated Lesson Plan"),
@@ -420,13 +544,17 @@ async def modify_lesson_plan(request: LessonPlanModifyRequest):
             assessments=assessments,
             resources=result.get("resources", []),
             differentiation=differentiation,
+            reflectionPrompts=reflection,
             totalSessions=len(sessions),
-            totalDuration=sum(s.duration for s in sessions)
+            totalDuration=sum(s.duration for s in sessions),
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Lesson plan modification failed: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to modify lesson plan: {str(e)}")
+
 
 
 @router.post("/generate-curriculum-plan")

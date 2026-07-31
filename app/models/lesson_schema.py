@@ -267,12 +267,42 @@ class ActivityGenerateResponse(BaseModel):
     learningOutcomes: List[str] = []
 
 
+class DetailedTopic(BaseModel):
+    name: str
+    periodsRequired: int
+    learningObjectives: List[str]
+    keyConcepts: List[str]
+
 class LessonPlanGenerateRequest(BaseModel):
-    topics: List[str]
+    topics: List[DetailedTopic]
     subject: str
     gradeLevel: str
     totalDuration: int
     classDuration: int = 45  # Duration per class period in minutes
+
+
+class ChunkBlock(BaseModel):
+    """One attention-span-sized chunk of the main teaching block.
+
+    Long, unbroken explanation is the #1 cause of lessons losing a class.
+    Instead of a single 'main_time' blob, the session's core instruction
+    is planned as a sequence of short chunks, each ending in a deliberate
+    check-in, matched to the grade band's realistic attention span.
+    """
+    order: int
+    focus: str                     # what this chunk teaches (a slice of the objective)
+    duration: int                   # minutes, sized to the grade's attention span
+    checkIn: str                    # the quick question/signal used to end this chunk
+
+
+class ReflectionPrompts(BaseModel):
+    """The 5-minute post-lesson reflection habit, generated per lesson so the
+    teacher doesn't have to remember to ask themselves these after class."""
+    mostConfusingPoint: str        # anticipated point of confusion to watch for
+    strongestExplanation: str      # which planned explanation/example is likely strongest
+    likelyDiscussionSpark: str     # which question is likely to spark the most discussion
+    objectiveCheckQuestion: str    # a question the teacher can ask themselves to verify the objective landed
+    suggestedRevision: str         # a placeholder prompt: "what would you change next time?"
 
 
 class LessonStep(BaseModel):
@@ -282,6 +312,8 @@ class LessonStep(BaseModel):
     method: str  # "I Do", "We Do", "You Do", "Discussion", etc.
     resources: List[str]
     notes: Optional[str] = None
+    checkInPrompt: Optional[str] = None
+    difficultyNote: Optional[str] = None
 
 
 class Concept(BaseModel):
@@ -314,6 +346,8 @@ class LessonSession(BaseModel):
     activities: List[LessonStep]
     checkForUnderstanding: List[CheckForUnderstanding]
     closure: str  # Summary and preview of next session
+    chunkPlan: List[ChunkBlock] = Field(default_factory=list)
+    backupPlan: Optional[str] = None
 
 
 class AssessmentPlan(BaseModel):
@@ -341,6 +375,7 @@ class LessonPlanGenerateResponse(BaseModel):
     differentiation: DifferentiationPlan
     totalSessions: int
     totalDuration: int  # Total minutes across all sessions
+    reflectionPrompts: Optional[ReflectionPrompts] = None
 
 
 class DoubtRequest(BaseModel):

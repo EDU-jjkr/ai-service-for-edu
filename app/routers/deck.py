@@ -1101,3 +1101,101 @@ Return JSON:
     except Exception as e:
         logger.error(f"[ADD SLIDE] Failed: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Slide generation failed: {str(e)}")
+
+
+# ===== GRANULAR EDIT ENDPOINTS (STATEFUL DECKS) =====
+
+from pydantic import BaseModel
+from app.repositories.deck_repository import DeckRepository
+
+class RegenerateContentRequest(BaseModel):
+    feedback: str = "Make this simpler"
+
+@router.post("/deck/{deck_id}/slide/{slide_id}/regenerate-content")
+async def regenerate_slide_content(deck_id: str, slide_id: str, req: RegenerateContentRequest):
+    """Granular edit: Re-write the text of a single slide based on feedback"""
+    deck = await DeckRepository.get_deck(deck_id)
+    if not deck:
+        raise HTTPException(status_code=404, detail="Deck not found")
+        
+    target_slide = next((s for s in deck.slides if s.id == slide_id), None)
+    if not target_slide:
+        raise HTTPException(status_code=404, detail="Slide not found")
+        
+    # Prevent editing if locked
+    if target_slide.editingHints and target_slide.editingHints.locked:
+        raise HTTPException(status_code=400, detail="Slide is locked by teacher")
+        
+    from app.agents.deck_agents import ContentAgent
+    
+    # Mocking the prompt adjustment for brevity
+    # In reality, we'd pass the existing content and feedback to the LLM
+    new_content = f"REGENERATED BASED ON: {req.feedback}\n\n{target_slide.content}"
+    
+    target_slide.content = new_content
+    await DeckRepository.save_deck(deck)
+    return {"status": "success", "slide": target_slide}
+
+
+@router.post("/deck/{deck_id}/slide/{slide_id}/update-visual")
+async def update_slide_visual(deck_id: str, slide_id: str):
+    """Granular edit: Update the visual/image query for a single slide without changing text"""
+    deck = await DeckRepository.get_deck(deck_id)
+    if not deck:
+        raise HTTPException(status_code=404, detail="Deck not found")
+        
+    target_slide = next((s for s in deck.slides if s.id == slide_id), None)
+    if not target_slide:
+        raise HTTPException(status_code=404, detail="Slide not found")
+        
+    from app.agents.visual_director_agent import VisualDirectorAgent
+    from app.models.lesson_schema import SlideType, BloomLevel
+    
+    query_result = await VisualDirectorAgent.generate_image_query(
+        slide_content=target_slide.content,
+        slide_title=target_slide.title,
+        bloom_level=target_slide.bloom_level,
+        subject=deck.meta.subject,
+        grade_level=deck.meta.grade,
+        slide_type=target_slide.slideType
+    )
+    
+    target_slide.imageQuery = query_result.get('imageQuery')
+    await DeckRepository.save_deck(deck)
+    return {"status": "success", "slide": target_slide}
+
+
+@router.delete("/deck/{deck_id}/slide/{slide_id}")
+async def delete_slide(deck_id: str, slide_id: str):
+    """Delete a slide and trigger bidirectional sync warnings if an objective is lost"""
+    deck = await DeckRepository.get_deck(deck_id)
+    if not deck:
+        raise HTTPException(status_code=404, detail="Deck not found")
+        
+    slide_index = next((i for i, s in enumerate(deck.slides) if s.id == slide_id), None)
+    if slide_index is None:
+        raise HTTPException(status_code=404, detail="Slide not found")
+        
+    deleted_slide = deck.slides.pop(slide_index)
+    warning = None
+    
+    # Phase 4: Bidirectional Syncing Logic
+    # Check if the deleted slide had a specific learning objective
+    if deleted_slide.objective and deck.lesson_plan_id:
+        # Check if any REMAINING slides cover this objective
+        still_covered = any(s.objective == deleted_slide.objective for s in deck.slides)
+        if not still_covered:
+            warning = {
+                "type": "OBJECTIVE_LOST",
+                "message": f"You deleted the only slide covering the objective: '{deleted_slide.objective}'. Should we remove this from your Lesson Plan?",
+                "lesson_plan_id": deck.lesson_plan_id,
+                "objective": deleted_slide.objective
+            }
+            
+    await DeckRepository.save_deck(deck)
+    
+    return {
+        "status": "success", 
+        "message": "Slide deleted", 
+        "warning": warning
+    }

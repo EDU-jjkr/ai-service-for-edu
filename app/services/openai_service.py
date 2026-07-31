@@ -1,49 +1,61 @@
 import os
-from openai import AsyncOpenAI
-from typing import List, Dict, Any, AsyncGenerator
 import json
+from openai import AsyncOpenAI
+from typing import Dict, Any, AsyncGenerator
 
 # Initialize the async client
 client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+DEFAULT_MODEL = os.getenv("OPENAI_JSON_MODEL", "gpt-5.6-luna")
+DEFAULT_COMPLETION_MODEL = os.getenv("OPENAI_COMPLETION_MODEL", "gpt-5.6-luna")
+DEFAULT_MAX_TOKENS = int(os.getenv("MAX_TOKENS", "32768"))
+
+# gpt-5.6-luna only supports the default temperature (1).
+# We keep the parameter in function signatures for API compatibility
+# but never forward it to the OpenAI call.
+
+
 async def generate_completion(
     prompt: str,
     system_message: str = "You are a helpful AI assistant for education.",
-    max_tokens: int = 2000,
-    temperature: float = 0.7
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+    temperature: float = 1,  # ignored — model only supports default
+    model: str = None,
 ) -> str:
-    """Generate a completion using OpenAI GPT-3.5-Turbo"""
+    """Generate a completion using gpt-5.6-luna."""
+    selected_model = model or DEFAULT_COMPLETION_MODEL
     try:
         response = await client.chat.completions.create(
-            model="gpt-3.5-turbo",
+            model=selected_model,
             messages=[
                 {"role": "system", "content": system_message},
-                {"role": "user", "content": prompt}
+                {"role": "user", "content": prompt},
             ],
-            max_tokens=max_tokens,
-            temperature=temperature
+            max_completion_tokens=max_tokens,
         )
         return response.choices[0].message.content
     except Exception as e:
         raise Exception(f"OpenAI API error: {str(e)}")
 
+
 async def generate_json_completion(
     prompt: str,
     system_message: str = "You are a helpful AI assistant. Always respond with valid JSON.",
-    max_tokens: int = 2000,
-    temperature: float = 0.7
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+    temperature: float = 1,  # ignored — model only supports default
+    model: str = None,
 ) -> Dict[str, Any]:
-    """Generate a JSON completion using OpenAI GPT-3.5-Turbo"""
+    """Generate a JSON completion using gpt-5.6-luna."""
+    selected_model = model or DEFAULT_MODEL
     try:
         response = await client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=selected_model,
             messages=[
                 {"role": "system", "content": system_message},
-                {"role": "user", "content": prompt}
+                {"role": "user", "content": prompt},
             ],
-            max_tokens=max_tokens,
-            temperature=temperature,
-            response_format={"type": "json_object"}
+            max_completion_tokens=max_tokens,
+            response_format={"type": "json_object"},
         )
         content = response.choices[0].message.content
         try:
@@ -55,23 +67,25 @@ async def generate_json_completion(
     except Exception as e:
         raise Exception(f"OpenAI API error: {str(e)}")
 
+
 async def stream_completion(
     prompt: str,
     system_message: str = "You are a helpful AI assistant.",
-    max_tokens: int = 2000,
-    temperature: float = 0.7
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+    temperature: float = 1,  # ignored — model only supports default
+    model: str = None,
 ) -> AsyncGenerator[str, None]:
-    """Stream completion chunks using OpenAI GPT-3.5-Turbo"""
+    """Stream completion chunks using gpt-5.6-luna."""
+    selected_model = model or DEFAULT_COMPLETION_MODEL
     try:
         stream = await client.chat.completions.create(
-            model="gpt-3.5-turbo",
+            model=selected_model,
             messages=[
                 {"role": "system", "content": system_message},
-                {"role": "user", "content": prompt}
+                {"role": "user", "content": prompt},
             ],
-            max_tokens=max_tokens,
-            temperature=temperature,
-            stream=True
+            max_completion_tokens=max_tokens,
+            stream=True,
         )
         async for chunk in stream:
             content = chunk.choices[0].delta.content
