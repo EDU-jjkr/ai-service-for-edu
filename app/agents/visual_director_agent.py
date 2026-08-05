@@ -6,6 +6,7 @@ Generates optimized image search queries from slide content for stock photo APIs
 from typing import Dict, Any
 from app.services.openai_service import generate_json_completion
 from app.models.lesson_schema import BloomLevel, SlideType
+from app.services.curated_assets import encode_curated_image_query, lookup_curated_asset
 import logging
 
 logger = logging.getLogger(__name__)
@@ -79,35 +80,67 @@ class VisualDirectorAgent:
             - imageType: "stock_photo", "diagram", or "illustration"
             - confidence: 0-100 score for using this image
         """
+        role_map = {
+            SlideType.INTRODUCTION: "hook",
+            SlideType.CONCEPT: "explain_core",
+            SlideType.ACTIVITY: "guided_practice",
+            SlideType.ASSESSMENT: "independent_practice",
+            SlideType.SUMMARY: "summary",
+        }
+        pedagogical_role = role_map.get(slide_type, "explain_core")
+
+        curated = lookup_curated_asset(
+            subject=subject,
+            topic=slide_title,
+            pedagogical_role=pedagogical_role,
+        )
+        if curated:
+            logger.info("Using curated asset %s for slide '%s'", curated.asset_id, slide_title)
+            return {
+                "imageQuery": encode_curated_image_query(curated),
+                "orientation": "landscape",
+                "imageType": curated.asset_type,
+                "confidence": 95,
+                "reasoning": f"Using curated asset {curated.asset_id}",
+            }
         
-        # Skip image generation for certain slide types
-        if slide_type == SlideType.SUMMARY:
-            logger.info(f"Skipping image for SUMMARY slide: {slide_title}")
+        # Only use stock photos when they genuinely add context.
+        if slide_type in [SlideType.SUMMARY, SlideType.ACTIVITY, SlideType.ASSESSMENT]:
+            logger.info(f"Skipping stock photo for {slide_type.value} slide: {slide_title}")
             return {
                 "imageQuery": None,
                 "orientation": "landscape",
-                "imageType": "none"
+                "imageType": "none",
+                "confidence": 0,
+                "reasoning": "This slide is better served by text, practice structure, or generated diagrams."
             }
         
-        system_message = """You are a Visual Content Director for educational materials.
+        system_message = """You are a Visual Content Director for premium educational decks.
 
-Generate concise image search queries for stock photo APIs (Unsplash, Pexels).
+Decide whether a slide needs a stock photo. If it does, generate a concise
+image search query for stock photo APIs (Unsplash, Pexels).
 
 RULES:
-1. Keep queries 3-8 words, simple and descriptive
-2. Focus on CONCRETE, PHOTOGRAPHABLE subjects
-3. Prefer real-world examples and clear visuals
-4. Consider age-appropriateness
+1. Return "none" unless a photo would materially improve comprehension or engagement.
+2. Use photos for real-world hooks, phenomena, people/places, artifacts, habitats, equipment, or observable scenes.
+3. Do NOT use photos for every concept slide.
+4. Do NOT use photos for formulas, definitions, ordinary bullet lists, worked examples, or recap slides.
+5. For math/physics, prefer no photo unless there is a concrete phenomenon, instrument, pattern, or lab setup.
+6. Avoid screenshots, text-heavy posters, memes, clip art, and generic students studying.
+7. Keep queries 3-8 words, concrete and photographable.
+8. confidence must be 0-100. Use at least 70 only when the image should be embedded.
 
 Return STRICT JSON (no trailing commas, no commentary):
 {
-  "imageQuery": "concise search query",
+  "imageQuery": "concise search query or null",
   "orientation": "landscape",
-  "imageType": "stock_photo"
+  "imageType": "stock_photo|none",
+  "confidence": 0,
+  "reasoning": "short reason"
 }
 
 orientation: "landscape" (default) or "portrait"
-imageType: "stock_photo", "diagram", or "illustration" """
+imageType: "stock_photo" or "none" """
 
         prompt = f"""Generate an image search query for this slide:
 
@@ -132,15 +165,20 @@ Slide Type: {slide_type.value}"""
             # Validate required keys
             query = result.get("imageQuery")
             
-            if not query:
+            confidence = int(result.get("confidence", 0) or 0)
+            image_type = result.get("imageType", "none")
+
+            if not query or image_type == "none" or confidence < 70:
                 logger.warning(
-                    f"No imageQuery in result for slide '{slide_title}' (type: {slide_type.value}). "
+                    f"No strong stock photo need for slide '{slide_title}' (type: {slide_type.value}). "
                     f"Raw result keys: {list(result.keys())}"
                 )
                 return {
                     "imageQuery": None,
                     "orientation": "landscape",
-                    "imageType": "none"
+                    "imageType": "none",
+                    "confidence": confidence,
+                    "reasoning": result.get("reasoning", "No photo needed")
                 }
             
             # Success - log for monitoring
@@ -149,7 +187,9 @@ Slide Type: {slide_type.value}"""
             return {
                 "imageQuery": query,
                 "orientation": result.get("orientation", "landscape"),
-                "imageType": result.get("imageType", "stock_photo")
+                "imageType": "stock_photo",
+                "confidence": confidence,
+                "reasoning": result.get("reasoning", "")
             }
             
         except KeyError as e:

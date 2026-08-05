@@ -1,7 +1,7 @@
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from app.services.openai_service import generate_json_completion, stream_completion
 from app.models.lesson_schema import BloomLevel, SlideType
-import json
+from app.services.prompt_stack import PromptBundle
 import logging
 import asyncio
 
@@ -15,7 +15,12 @@ class OutlinerAgent:
     """
     
     @staticmethod
-    async def create_outline(topic: str, subject: str, grade_level: str) -> List[Dict[str, str]]:
+    async def create_outline(
+        topic: str,
+        subject: str,
+        grade_level: str,
+        prompt_bundle: Optional[PromptBundle] = None,
+    ) -> List[Dict[str, str]]:
         """
         Create a curriculum-aligned outline using RAG with strict Bloom's Taxonomy progression.
         """
@@ -25,7 +30,7 @@ class OutlinerAgent:
         grade_num = int(grade_level) if grade_level.isdigit() else 8
         curriculum = "ISC" if grade_num >= 11 else "ICSE"
         
-        # Retrieve relevant curriculum standards
+        # Retrieve relevant curriculum standards 
         try:
             rag = get_curriculum_rag()
             standards = await rag.retrieve_relevant_standards(
@@ -44,7 +49,7 @@ class OutlinerAgent:
             standards = []
         
         # Enhanced system message with Bloom's Taxonomy instructions
-        system_message = """You are an expert curriculum designer with deep knowledge of Bloom's Taxonomy.
+        base_system_message = """You are an expert curriculum designer with deep knowledge of Bloom's Taxonomy.
 
 CRITICAL: Design a lesson that STRICTLY follows Bloom's Taxonomy progression:
 1. Start with REMEMBER (recall facts, define terms, list key points)
@@ -79,10 +84,11 @@ SLIDE TYPE GUIDELINES WITH MANDATORY PRACTICE:
 Return a JSON object with a 'slides' key containing a list of slide outlines."""
 
         # Inject standards into system message if available
+        system_message = base_system_message
         if standards:
             system_message = rag.inject_into_prompt(standards, system_message)
 
-        prompt = f"""Create a lesson outline for:
+        base_prompt = f"""Create a lesson outline for:
 Topic: {topic}
 Subject: {subject}
 Grade: {grade_level}
@@ -121,6 +127,11 @@ MANDATORY REQUIREMENTS:
 - Include at least 1-2 practice questions for EACH sub-topic
 - Include a \"Final Challenge Round\" assessment with 3+ mixed questions
 - Ensure smooth Bloom's Taxonomy progression"""
+        prompt = base_prompt
+
+        if prompt_bundle:
+            system_message = "\n\n".join([prompt_bundle.system_prompt, system_message])
+            prompt = "\n\n".join([prompt_bundle.user_prompt, base_prompt])
 
         try:
             result = await generate_json_completion(
@@ -185,7 +196,7 @@ class ContentAgent:
         # Check if this is a science/physics subject that needs detailed explanations
         is_science = any(kw in subject.lower() for kw in ['physics', 'chemistry', 'science', 'biology'])
         
-        system_message = f"""You are an expert teacher for Grade {grade_level} {subject}.
+        base_system_message = f"""You are an expert teacher for Grade {grade_level} {subject}.
 Write COMPREHENSIVE teaching content for a presentation slide.
 This content will be used to actually TEACH students, so be thorough.
 Do not include markdown for bolding (**), just plain text.
@@ -262,7 +273,7 @@ Provide:
         else:
             content_guidance = "Provide comprehensive content with 6-8 detailed points."
         
-        prompt = f"""Write DETAILED teaching content for this slide:
+        base_prompt = f"""Write DETAILED teaching content for this slide:
 Title: {slide_outline['title']}
 Type: {slide_type}
 Bloom's Level: {bloom_level}
@@ -272,6 +283,13 @@ Objective: {slide_outline['objective']}
 
 Remember: This content will be used to TEACH students. Be thorough, clear, and educational.
 Include enough detail that a teacher can use this to deliver a complete lesson on the topic."""
+        prompt_bundle = slide_outline.get("prompt_stack")
+        if prompt_bundle:
+            system_message = "\n\n".join([prompt_bundle.system_prompt, base_system_message])
+            prompt = "\n\n".join([prompt_bundle.user_prompt, base_prompt])
+        else:
+            system_message = base_system_message
+            prompt = base_prompt
 
         async for chunk in stream_completion(prompt, system_message, max_tokens=800):
             yield chunk
@@ -279,105 +297,193 @@ Include enough detail that a teacher can use this to deliver a complete lesson o
     @staticmethod
     async def generate_all_slides_parallel(outline: List[Dict], subject: str, grade_level: str) -> List[Dict]:
         """
-        Generate content for all slides in parallel using asyncio.gather().
-        Includes text content, speaker notes, and image queries.
-        
-        Returns: List[Slide] with full content + metadata
+        Generate content, speaker notes, and visual spec for all slides in parallel.
+        Each slide is a single JSON completion — the model decides the visual type
+        (mermaid, chart, math, stock_photo, or none) while writing the content,
+        so the decision is always in-context and accurate.
+
+        The returned dicts include a 'visualSpec' key that deck.py converts into
+        VisualMetadata. No separate content-analysis or routing pass needed.
         """
-        from app.agents.visual_director_agent import VisualDirectorAgent
-        
+
+        is_quantitative = any(
+            kw in subject.lower()
+            for kw in ['physics', 'chemistry', 'science', 'biology', 'math', 'mathematics', 'algebra', 'calculus', 'statistics']
+        )
+
         async def generate_single_slide(slide_plan: Dict, index: int) -> Dict:
-            """Generate complete content for a single slide."""
-            try:
-                # Generate text content
-                content_chunks = []
-                async for chunk in ContentAgent.generate_slide_content(
-                    slide_outline=slide_plan,
-                    subject=subject,
-                    grade_level=grade_level
-                ):
-                    content_chunks.append(chunk)
-                content = ''.join(content_chunks)
-                
-                # Generate speaker notes
-                notes = await ContentAgent.generate_speaker_notes(
-                    title=slide_plan.get('title', ''),
-                    content=content,
-                    bloom_level=slide_plan.get('bloom_level', 'UNDERSTAND'),
-                    subject=subject
+            slide_type = slide_plan.get('slideType', slide_plan.get('type', 'CONCEPT'))
+            bloom_level = slide_plan.get('bloom_level', 'UNDERSTAND')
+
+            if slide_type == 'INTRODUCTION':
+                content_guidance = (
+                    "• Hook/engaging opening (interesting fact or question)\n"
+                    "• Clear definition of the main concept\n"
+                    "• Historical background (when, who, why it was discovered)\n"
+                    "• Why this topic matters / real-world relevance\n"
+                    "• Overview of what will be covered"
                 )
-                
-                # Generate image query (skip for SUMMARY slides)
-                image_query = None
-                slide_type_str = slide_plan.get('slideType', slide_plan.get('type', 'CONCEPT'))
-                bloom_level_str = slide_plan.get('bloom_level', 'UNDERSTAND')
-                
-                # Convert strings to enums
-                try:
-                    bloom_level_enum = BloomLevel[bloom_level_str] if isinstance(bloom_level_str, str) else bloom_level_str
-                except (KeyError, TypeError):
-                    bloom_level_enum = BloomLevel.UNDERSTAND
-                
-                try:
-                    slide_type_enum = SlideType[slide_type_str] if isinstance(slide_type_str, str) else slide_type_str
-                except (KeyError, TypeError):
-                    slide_type_enum = SlideType.CONCEPT
-                
-                if slide_type_str != "SUMMARY":
-                    try:
-                        query_result = await VisualDirectorAgent.generate_image_query(
-                            slide_content=content,
-                            slide_title=slide_plan.get('title', ''),
-                            bloom_level=bloom_level_enum,
-                            subject=subject,
-                            grade_level=grade_level,
-                            slide_type=slide_type_enum
-                        )
-                        # Fixed: Use 'imageQuery' instead of 'query'
-                        image_query = query_result.get('imageQuery')
-                        logger.debug(f"Image query for slide {index} '{slide_plan.get('title', '')}': {image_query}")
-                    except Exception as e:
-                        logger.warning(
-                            f"Image query generation failed for slide {index} "
-                            f"(title: '{slide_plan.get('title', '')}', type: {slide_type_str}): {e}"
-                        )
-                
+            elif slide_type == 'CONCEPT':
+                content_guidance = (
+                    "• Detailed explanation of the concept\n"
+                    + ("• Mathematical formulation with full breakdown of each variable\n" if is_quantitative else "• Key characteristics and attributes\n")
+                    + "• Physical/real meaning and intuition\n"
+                    "• Real-world examples and applications\n"
+                    "• Common misconceptions to address"
+                )
+            elif slide_type in ('ACTIVITY', 'ASSESSMENT'):
+                content_guidance = (
+                    "• Clear problem statement with all given information\n"
+                    "• Step-by-step solution approach\n"
+                    "• Complete worked solution with final answer clearly stated\n"
+                    "• Explanation of key insights\n"
+                    "• Common mistakes to avoid"
+                )
+            elif slide_type == 'SUMMARY':
+                content_guidance = (
+                    "• Key concepts covered (comprehensive list)\n"
+                    "• Important equations/formulas to remember\n"
+                    "• Key takeaways and insights\n"
+                    "• How this connects to other topics"
+                )
+            else:
+                content_guidance = "Provide 6-8 comprehensive bullet points covering the core ideas."
+
+            system_message = f"""You are an expert teacher for Grade {grade_level} {subject}.
+Return a SINGLE valid JSON object with these exact keys: content, speakerNotes, visualSpec.
+Plain text only in content — no markdown bold (**).
+
+VISUAL SPEC DECISION (choose ONE type for visualSpec.type):
+• "mermaid"     — when the slide describes a process, cycle, sequence, flow, hierarchy, state machine, or concept map.
+                  Generate syntactically valid Mermaid.js code (5-8 nodes max). Quote node labels that contain
+                  special characters: A["Label (with parens)"].
+• "chart"       — ONLY when the slide contains real numerical data worth comparing (statistics, measurements, growth).
+                  Provide parallel labels[] and values[] arrays.
+• "math"        — when the slide has equations or formulas that must be displayed (physics, chemistry, algebra).
+                  Provide LaTeX strings in equations[].
+• "stock_photo" — for INTRODUCTION or hook slides, and CONCEPT slides showing observable real-world phenomena
+                  (living organisms, lab equipment, historical scenes, physical processes). 3-6 word search query.
+• "none"        — ACTIVITY, ASSESSMENT, SUMMARY slides; pure definition slides; worked examples; anything
+                  where text alone is sufficient. When in doubt, use "none"."""
+
+            prompt = f"""Write a complete slide.
+
+Title: {slide_plan.get('title', '')}
+Type: {slide_type}
+Bloom's Level: {bloom_level}
+Objective: {slide_plan.get('objective', '')}
+
+Content must include:
+{content_guidance}
+
+Return ONLY this JSON (no extra keys, no comments):
+{{
+  "content": "slide text using • for bullet points",
+  "speakerNotes": "teacher notes under 100 words: 2-3 key teaching points, one misconception, one question",
+  "visualSpec": {{
+    "type": "mermaid|chart|math|stock_photo|none",
+    "mermaidCode": "flowchart TD\\n    A[\\"Start\\"] --> B[\\"Step\\"]",
+    "diagramType": "flowchart",
+    "chartType": "bar",
+    "labels": [],
+    "values": [],
+    "equations": [],
+    "imageQuery": null
+  }}
+}}
+
+Include only the fields relevant to the chosen type; set irrelevant array fields to [] and strings to null."""
+
+            prompt_bundle = slide_plan.get("prompt_stack")
+            if prompt_bundle:
+                system_message = "\n\n".join([prompt_bundle.system_prompt, system_message])
+                prompt = "\n\n".join([prompt_bundle.user_prompt, prompt])
+
+            try:
+                result = await generate_json_completion(
+                    prompt=prompt,
+                    system_message=system_message,
+                    max_tokens=1200,
+                    temperature=0.7,
+                )
+
+                visual_spec = result.get('visualSpec') or {}
+                image_query = visual_spec.get('imageQuery') if visual_spec.get('type') == 'stock_photo' else None
+
                 return {
                     "title": slide_plan.get('title', f"Slide {index + 1}"),
-                    "content": content,
+                    "content": result.get('content', ''),
                     "order": index,
-                    "slideType": slide_type_str,
-                    "bloom_level": slide_plan.get('bloom_level', 'UNDERSTAND'),
-                    "speakerNotes": notes,
+                    "slideType": slide_type,
+                    "bloom_level": bloom_level,
+                    "speakerNotes": result.get('speakerNotes', ''),
                     "imageQuery": image_query,
-                    "objective": slide_plan.get('objective', '')
+                    "visualSpec": visual_spec,
+                    "objective": slide_plan.get('objective', ''),
                 }
-                
+
             except Exception as e:
-                logger.error(f"Failed to generate slide {index} ({{slide_plan.get('title')}}): {e}")
-                # Return minimal slide on error with fallback content
+                logger.error(f"Failed to generate slide {index} ({slide_plan.get('title')}): {e}")
                 return {
                     "title": slide_plan.get('title', f"Slide {index + 1}"),
                     "content": "Content generation in progress. Please regenerate this slide.",
                     "order": index,
-                    "slideType": slide_plan.get('slideType', slide_plan.get('type', 'CONCEPT')),
-                    "bloom_level": slide_plan.get('bloom_level', 'UNDERSTAND'),
+                    "slideType": slide_type,
+                    "bloom_level": bloom_level,
                     "speakerNotes": "",
                     "imageQuery": None,
-                    "objective": slide_plan.get('objective', '')
+                    "visualSpec": {"type": "none"},
+                    "objective": slide_plan.get('objective', ''),
                 }
-        
-        # Parallel execution with asyncio.gather
+
         logger.info(f"Generating {len(outline)} slides in parallel...")
-        tasks = [
-            generate_single_slide(plan, i)
-            for i, plan in enumerate(outline)
-        ]
-        
-        slides = await asyncio.gather(*tasks)
+        slides = await asyncio.gather(*[generate_single_slide(plan, i) for i, plan in enumerate(outline)])
         logger.info(f"✓ Generated {len(slides)} slides")
-        
         return list(slides)
+
+    @staticmethod
+    def build_generation_outline(
+        structured_slides: List[Any],
+        outline: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Normalize structured slide shells into the outline shape expected by
+        the slide content generator while preserving planner-driven ordering.
+        """
+        normalized_outline: List[Dict[str, Any]] = []
+        source_outline = outline or []
+        total_slides = max(len(structured_slides), len(source_outline))
+
+        for index in range(total_slides):
+            outline_slide = source_outline[index] if index < len(source_outline) else {}
+            structured_slide = structured_slides[index] if index < len(structured_slides) else None
+
+            if structured_slide is not None and hasattr(structured_slide, "title"):
+                title = structured_slide.title
+                slide_type = structured_slide.slideType.value
+                bloom_level = structured_slide.bloom_level.value
+                objective = structured_slide.objective or outline_slide.get("objective") or structured_slide.title
+            elif structured_slide is not None:
+                title = structured_slide.get("title", outline_slide.get("title", f"Slide {index + 1}"))
+                slide_type = structured_slide.get("slideType", outline_slide.get("slideType", "CONCEPT"))
+                bloom_level = structured_slide.get("bloom_level", outline_slide.get("bloom_level", "UNDERSTAND"))
+                objective = structured_slide.get("objective") or outline_slide.get("objective") or title
+            else:
+                title = outline_slide.get("title", f"Slide {index + 1}")
+                slide_type = outline_slide.get("slideType", "CONCEPT")
+                bloom_level = outline_slide.get("bloom_level", "UNDERSTAND")
+                objective = outline_slide.get("objective") or title
+
+            normalized_outline.append(
+                {
+                    "title": title,
+                    "slideType": slide_type,
+                    "bloom_level": bloom_level,
+                    "objective": objective,
+                }
+            )
+
+        return normalized_outline
     
     @staticmethod
     async def generate_speaker_notes(title: str, content: str, bloom_level: str, subject: str) -> str:

@@ -71,8 +71,6 @@ async def parse_textbook_index(request: TextbookIndexParseRequest):
         result = await generate_json_completion(
             prompt=prompt,
             system_message=system_message,
-            max_tokens=2000,
-            temperature=0.3
         )
 
         return TextbookIndexParseResponse(chapters=result["chapters"])

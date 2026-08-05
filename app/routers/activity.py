@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from app.models.schemas import QuizGenerateRequest, QuizGenerateResponse
 from app.services.openai_service import generate_json_completion
+from app.services.prompt_policy import difficulty_contract
 
 router = APIRouter()
 
@@ -16,8 +17,8 @@ async def generate_quiz(request: QuizGenerateRequest):
         count = int(request.count) if request.count else 5
         additional_instructions = str(request.additionalInstructions) if request.additionalInstructions else ""
         
-        system_message = """You are an expert educational content creator specializing in interactive quizzes. 
-You create engaging, curriculum-aligned questions that test understanding and critical thinking.
+        system_message = """You are generating curriculum-aligned quiz items.
+Use measurable instructional constraints instead of vague style adjectives.
 Your output must be strictly valid JSON."""
 
         prompt = f"""Generate {count} interactive quiz questions for the following context:
@@ -31,14 +32,25 @@ Requirements:
 2. Mix of types: 'multiple-choice' (mostly), 'true-false', or 'short-answer'.
 3. For multiple-choice, provide exactly 4 options.
 4. Difficulty Progression:
-   - Start with 'easy' questions (conceptual/basic).
-   - Move to 'medium' questions (application-based).
-   - End with 'hard' questions (complex/critical thinking).
-5. For 'hard' questions:
-   - The options must be VERY confusing and plausible.
-   - Distractors should test deep understanding.
-6. 'answer' must be the exact string of the correct option.
-7. 'explanation' must explain WHY the answer is correct.
+   - First questions follow the FOUNDATION CHECK profile.
+   - Middle questions follow the MULTI-STEP APPLICATION profile.
+   - Final questions follow the INTEGRATED CHALLENGE profile.
+5. Difficulty contracts:
+FOUNDATION CHECK:
+{difficulty_contract("foundation")}
+
+MULTI-STEP APPLICATION:
+{difficulty_contract("application")}
+
+INTEGRATED CHALLENGE:
+{difficulty_contract("integrated")}
+
+6. For integrated challenge questions:
+   - options must remain plausible
+   - distractors should reflect specific misconceptions or reasoning mistakes
+   - avoid trick wording
+7. 'answer' must be the exact string of the correct option.
+8. 'explanation' must explain WHY the answer is correct in 1-3 direct sentences.
 """
 
         # Add teacher's additional instructions if provided
@@ -60,7 +72,7 @@ OUTPUT JSON FORMAT:
             "options": ["Option A", "Option B", "Option C", "Option D"],
             "answer": "Option B",
             "explanation": "Explanation here...",
-            "difficulty": "easy" 
+            "difficulty": "foundation_check"
         }}
     ]
 }}
@@ -69,8 +81,6 @@ OUTPUT JSON FORMAT:
         result = await generate_json_completion(
             prompt=prompt,
             system_message=system_message,
-            max_tokens=2000,
-            temperature=0.7
         )
 
         return QuizGenerateResponse(**result)

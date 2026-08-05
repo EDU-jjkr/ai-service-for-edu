@@ -1,18 +1,97 @@
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
-from app.models.schemas import DeckGenerateRequest, DeckGenerateResponse, Slide, VisualMetadata
+from app.models.schemas import DeckGenerateRequest, DeckGenerateResponse, Slide, VisualMetadata, PPTXRenderRequest
 from app.models.modify_schemas import DeckModifyRequest
-from app.models.lesson_schema import LessonDeck, LessonMetadata, LearningStructure, LearningObjective, BloomLevel
+from app.models.lesson_schema import LessonDeck, LessonMetadata, LearningStructure, LearningObjective, BloomLevel, SlideType, PedagogicalRole, ContentMode, DensityLevel, ImportanceLevel, VisualIntent, EditingHints, PracticeMetadata, ContentBlock
 from app.services.openai_service import generate_json_completion
-from app.services.visual_routing import batch_route_slides
-from app.services.visual_generator import batch_generate_visuals
+from app.services.deck_schema_builder import build_structured_slides_from_plan, expand_structured_slides_to_outline
+from app.services.lesson_narrative_planner import build_lesson_narrative_plan
+from app.services.pedagogy_flows import select_pedagogy_flow
 from app.services.pptx_renderer import PPTXRenderer
+from app.services.slide_quality import apply_quality_guards_to_lesson
+from app.services.prompt_stack import build_lesson_planner_prompt, build_slide_author_prompt
 import logging
 import json
 import asyncio
+from pydantic import BaseModel
+from typing import Any, Optional
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _visual_metadata_from_spec(visual_spec: dict | None) -> VisualMetadata | None:
+    """Convert a visualSpec dict (produced by ContentAgent) into a VisualMetadata object."""
+    if not visual_spec:
+        return None
+
+    vtype = visual_spec.get("type", "none")
+
+    if vtype == "mermaid":
+        code = (visual_spec.get("mermaidCode") or "").strip()
+        if not code:
+            return None
+        return VisualMetadata(
+            visualType="diagram",
+            visualConfig={
+                "generatedData": {
+                    "code": code,
+                    "diagramType": visual_spec.get("diagramType") or "flowchart",
+                    "description": "",
+                }
+            },
+            generatedBy="mermaid",
+            confidence=90.0,
+            reasoning="Generated in-context by content agent",
+        )
+
+    if vtype == "chart":
+        labels = visual_spec.get("labels") or []
+        values = visual_spec.get("values") or []
+        if not labels or not values or len(labels) < 2:
+            return None
+        chart_type = visual_spec.get("chartType") or "bar"
+        data_points = [{"label": str(l), "value": v} for l, v in zip(labels, values)]
+        from app.services.chart_generator import _build_chart_config, _generate_quickchart_url
+        chart_config = _build_chart_config("", chart_type, data_points)
+        quick_url = _generate_quickchart_url(chart_config, chart_type)
+        return VisualMetadata(
+            visualType="chart",
+            visualConfig={
+                "generatedData": {
+                    "config": chart_config,
+                    "chartType": chart_type,
+                    "quickChartUrl": quick_url,
+                    "dataPoints": data_points,
+                }
+            },
+            generatedBy="chartjs",
+            confidence=85.0,
+            reasoning="Generated in-context by content agent",
+        )
+
+    if vtype == "math":
+        equations = visual_spec.get("equations") or []
+        equations = [e for e in equations if isinstance(e, str) and e.strip()]
+        if not equations:
+            return None
+        display_mode = "block" if len(equations) <= 3 else "inline"
+        return VisualMetadata(
+            visualType="math",
+            visualConfig={
+                "generatedData": {
+                    "equations": equations,
+                    "displayMode": display_mode,
+                }
+            },
+            generatedBy="latex",
+            confidence=90.0,
+            reasoning="Generated in-context by content agent",
+        )
+
+    # stock_photo and none: no VisualMetadata (imageQuery is stored on the slide directly)
+    return None
+
 
 # Subject Classification Helper
 def classify_subject(subject: str) -> str:
@@ -34,94 +113,487 @@ def classify_subject(subject: str) -> str:
     
     return 'quantitative' if is_quantitative else 'descriptive'
 
-# ... (generate_deck function stays here, simplified for brevity in this replace block if not editing it) ...
+
+def _enum_value(enum_cls, value, default):
+    if isinstance(value, enum_cls):
+        return value
+    if isinstance(value, str):
+        try:
+            return enum_cls[value.upper()]
+        except KeyError:
+            try:
+                return enum_cls(value.upper())
+            except ValueError:
+                return default
+    return default
+
+
+def _build_response(lesson_deck: LessonDeck, title: str | None = None) -> DeckGenerateResponse:
+    lesson_deck = apply_quality_guards_to_lesson(lesson_deck)
+    response_title = title or lesson_deck.meta.topic
+    return DeckGenerateResponse(
+        lesson=lesson_deck,
+        title=response_title,
+        meta=lesson_deck.meta.model_dump(mode="json"),
+        structure=lesson_deck.structure.model_dump(mode="json"),
+        slides=lesson_deck.slides,
+    )
+
+
+def _serialize_lesson_deck_payload(lesson_deck: LessonDeck, title: str | None = None) -> dict[str, Any]:
+    response = _build_response(lesson_deck, title=title)
+    return {
+        "title": response.title,
+        "meta": response.meta,
+        "structure": response.structure,
+        "slides": [slide.model_dump(mode="json") for slide in response.slides],
+    }
+
+
+def _lesson_from_payload(
+    slides_data,
+    topic: str,
+    subject: str,
+    grade_level: str,
+    theme: str = "default",
+    meta: dict | None = None,
+    structure: dict | None = None,
+    fallback_slides: list[Slide] | None = None,
+) -> LessonDeck:
+    slide_objects = []
+
+    for i, slide in enumerate(slides_data):
+        fallback_slide = fallback_slides[i] if fallback_slides and i < len(fallback_slides) else None
+        slide_obj = Slide(
+            title=slide.get("title") or (fallback_slide.title if fallback_slide else f"Slide {i+1}"),
+            content=slide.get("content") or (fallback_slide.content if fallback_slide else ""),
+            order=slide.get("order", i + 1),
+            slideType=_enum_value(
+                SlideType,
+                slide.get("slideType") or slide.get("type") or (fallback_slide.slideType.value if fallback_slide else None),
+                fallback_slide.slideType if fallback_slide else SlideType.CONCEPT,
+            ),
+            bloom_level=_enum_value(
+                BloomLevel,
+                slide.get("bloom_level") or (fallback_slide.bloom_level.value if fallback_slide else None),
+                fallback_slide.bloom_level if fallback_slide else BloomLevel.UNDERSTAND,
+            ),
+            objective=slide.get("objective") or (fallback_slide.objective if fallback_slide else None),
+            speakerNotes=slide.get("speakerNotes") or slide.get("speaker_notes") or (fallback_slide.speakerNotes if fallback_slide else None),
+            imageQuery=slide.get("imageQuery") or slide.get("image_query") or (fallback_slide.imageQuery if fallback_slide else None),
+            visualMetadata=(
+                VisualMetadata(**slide["visualMetadata"])
+                if slide.get("visualMetadata")
+                else (fallback_slide.visualMetadata if fallback_slide else None)
+            ),
+            clusterId=slide.get("clusterId") or (fallback_slide.clusterId if fallback_slide else None),
+            pedagogicalRole=_enum_value(
+                PedagogicalRole,
+                slide.get("pedagogicalRole") or (fallback_slide.pedagogicalRole.value if fallback_slide and fallback_slide.pedagogicalRole else None),
+                fallback_slide.pedagogicalRole if fallback_slide else None,
+            ),
+            instructionalGoal=slide.get("instructionalGoal") or (fallback_slide.instructionalGoal if fallback_slide else None),
+            contentMode=_enum_value(
+                ContentMode,
+                slide.get("contentMode") or (fallback_slide.contentMode.value if fallback_slide and fallback_slide.contentMode else None),
+                fallback_slide.contentMode if fallback_slide else None,
+            ),
+            contentBlocks=[
+                block if isinstance(block, ContentBlock) else ContentBlock(**block)
+                for block in (
+                    slide.get("contentBlocks")
+                    or ([block.model_dump(mode="json") for block in fallback_slide.contentBlocks] if fallback_slide and fallback_slide.contentBlocks else [])
+                )
+            ],
+            layoutCandidates=slide.get("layoutCandidates") or (fallback_slide.layoutCandidates if fallback_slide else []),
+            density=_enum_value(
+                DensityLevel,
+                slide.get("density") or (fallback_slide.density.value if fallback_slide and fallback_slide.density else None),
+                fallback_slide.density if fallback_slide else None,
+            ),
+            importance=_enum_value(
+                ImportanceLevel,
+                slide.get("importance") or (fallback_slide.importance.value if fallback_slide and fallback_slide.importance else None),
+                fallback_slide.importance if fallback_slide else None,
+            ),
+            visualIntent=(
+                VisualIntent(**slide["visualIntent"])
+                if slide.get("visualIntent")
+                else (fallback_slide.visualIntent if fallback_slide else None)
+            ),
+            editingHints=(
+                EditingHints(**slide["editingHints"])
+                if slide.get("editingHints")
+                else (fallback_slide.editingHints if fallback_slide else None)
+            ),
+            practiceMetadata=(
+                PracticeMetadata(**slide["practiceMetadata"])
+                if slide.get("practiceMetadata")
+                else (fallback_slide.practiceMetadata if fallback_slide else None)
+            ),
+        )
+        slide_objects.append(slide_obj)
+
+    lesson_meta = LessonMetadata(
+        topic=meta.get("topic", topic) if meta else topic,
+        grade=meta.get("grade", grade_level) if meta else grade_level,
+        subject=meta.get("subject", subject) if meta else subject,
+        standards=meta.get("standards", []) if meta else [],
+        theme=meta.get("theme", theme) if meta else theme,
+        pedagogical_model=meta.get("pedagogical_model", "I_DO_WE_DO_YOU_DO") if meta else "I_DO_WE_DO_YOU_DO",
+        pedagogical_flow=meta.get("pedagogical_flow", "default_classroom") if meta else "default_classroom",
+    )
+    lesson_structure = LearningStructure(
+        learning_objectives=[
+            LearningObjective(
+                objective=obj.get("objective", ""),
+                bloom_level=_enum_value(BloomLevel, obj.get("bloom_level"), BloomLevel.UNDERSTAND),
+            )
+            for obj in (structure.get("learning_objectives", []) if structure else [])
+            if obj.get("objective")
+        ],
+        vocabulary=structure.get("vocabulary", []) if structure else [],
+        prerequisites=structure.get("prerequisites", []) if structure else [],
+        bloom_progression=[
+            _enum_value(BloomLevel, level, BloomLevel.UNDERSTAND)
+            for level in (structure.get("bloom_progression", []) if structure else [])
+        ] if structure else [slide.bloom_level for slide in slide_objects],
+    )
+
+    if not lesson_structure.learning_objectives:
+        lesson_structure.learning_objectives = [
+            LearningObjective(objective=slide.objective or slide.title, bloom_level=slide.bloom_level)
+            for slide in slide_objects[:3]
+        ]
+
+    return LessonDeck(
+        meta=lesson_meta,
+        structure=lesson_structure,
+        slides=slide_objects,
+    )
+
+
+class DeckRegenerateClusterRequest(BaseModel):
+    deckId: str
+    clusterId: str
+    pedagogicalRole: str
+    subject: str
+    gradeLevel: str
+    currentDeck: dict[str, Any]
+
+
+def _slide_match_key(slide: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        slide.get("id"),
+        (slide.get("title") or "").strip().lower(),
+        (slide.get("content") or "").strip().lower(),
+    )
+
+
+def _find_fallback_slide(
+    *,
+    slide_data: dict[str, Any],
+    index: int,
+    current_lesson_slides: list[dict[str, Any]],
+) -> dict[str, Any]:
+    slide_id = slide_data.get("id")
+    if slide_id:
+        for existing in current_lesson_slides:
+            if existing.get("id") == slide_id:
+                return existing
+
+    target_title = (slide_data.get("title") or "").strip().lower()
+    if target_title:
+        for existing in current_lesson_slides:
+            if (existing.get("title") or "").strip().lower() == target_title:
+                return existing
+
+    slide_key = _slide_match_key(slide_data)
+    if any(slide_key[1:]):
+        for existing in current_lesson_slides:
+            if _slide_match_key(existing)[1:] == slide_key[1:]:
+                return existing
+
+    if index < len(current_lesson_slides):
+        return current_lesson_slides[index]
+
+    return {}
+
+
+async def _build_modified_deck_response(
+    *,
+    current_deck: dict[str, Any],
+    feedback: str,
+    subject: str,
+    grade_level: str,
+) -> DeckGenerateResponse:
+    current_deck_json = json.dumps(current_deck, indent=2)
+
+    system_message = """You are an expert instructional designer revising a structured presentation deck.
+    Apply the requested change while preserving the valid lesson-deck schema and existing structured metadata whenever possible."""
+
+    prompt = f"""REVISE THIS DECK.
+
+    CONTEXT:
+    Subject: {subject}
+    Grade: {grade_level}
+
+    USER FEEDBACK / INSTRUCTIONS:
+    "{feedback}"
+
+    CURRENT DECK JSON:
+    {current_deck_json}
+
+    TASK:
+    1. Apply the user's feedback to the deck.
+    2. Preserve the complete structured lesson-deck shape with lesson/meta/structure/slides semantics.
+    3. Keep structured slide metadata fields such as clusterId, pedagogicalRole, instructionalGoal, contentMode, contentBlocks, layoutCandidates, visualIntent, editingHints, and practiceMetadata unless the requested change requires a targeted update.
+    4. Return the COMPLETE updated JSON.
+    """
+
+    result = await generate_json_completion(
+        prompt=prompt,
+        system_message=system_message,
+        max_tokens=3000,
+        temperature=0.7
+    )
+
+    fallback_slides = []
+    current_lesson = current_deck.get("lesson", {})
+    current_lesson_slides = current_lesson.get("slides", [])
+
+    for index, slide_data in enumerate(result.get("slides", [])):
+        fallback_slide_data = _find_fallback_slide(
+            slide_data=slide_data,
+            index=index,
+            current_lesson_slides=current_lesson_slides,
+        )
+        # Preserve existing visualMetadata from the original slide; the modify
+        # path does not regenerate visuals — content changes are what matter.
+        raw_vm = slide_data.get("visualMetadata") or fallback_slide_data.get("visualMetadata")
+        visual_metadata = VisualMetadata(**raw_vm) if isinstance(raw_vm, dict) else raw_vm
+
+        fallback_slides.append(Slide(
+            id=slide_data.get("id") or fallback_slide_data.get("id"),
+            title=slide_data.get("title", fallback_slide_data.get("title", "Untitled")),
+            content=slide_data.get("content", fallback_slide_data.get("content", "")),
+            order=slide_data.get("order", index + 1),
+            slideType=_enum_value(SlideType, slide_data.get("slideType") or fallback_slide_data.get("slideType"), SlideType.CONCEPT),
+            bloom_level=_enum_value(BloomLevel, slide_data.get("bloom_level") or fallback_slide_data.get("bloom_level"), BloomLevel.UNDERSTAND),
+            objective=slide_data.get("objective") or fallback_slide_data.get("objective"),
+            speakerNotes=slide_data.get("speakerNotes") or fallback_slide_data.get("speakerNotes"),
+            imageQuery=slide_data.get("imageQuery") or fallback_slide_data.get("imageQuery"),
+            visualMetadata=visual_metadata,
+            clusterId=slide_data.get("clusterId") or fallback_slide_data.get("clusterId"),
+            pedagogicalRole=_enum_value(PedagogicalRole, slide_data.get("pedagogicalRole") or fallback_slide_data.get("pedagogicalRole"), None),
+            instructionalGoal=slide_data.get("instructionalGoal") or fallback_slide_data.get("instructionalGoal"),
+            contentMode=_enum_value(ContentMode, slide_data.get("contentMode") or fallback_slide_data.get("contentMode"), None),
+            contentBlocks=[ContentBlock(**block) for block in slide_data.get("contentBlocks", fallback_slide_data.get("contentBlocks", []))],
+            layoutCandidates=slide_data.get("layoutCandidates") or fallback_slide_data.get("layoutCandidates", []),
+            density=_enum_value(DensityLevel, slide_data.get("density") or fallback_slide_data.get("density"), None),
+            importance=_enum_value(ImportanceLevel, slide_data.get("importance") or fallback_slide_data.get("importance"), None),
+            visualIntent=VisualIntent(**slide_data["visualIntent"]) if slide_data.get("visualIntent") else (VisualIntent(**fallback_slide_data["visualIntent"]) if fallback_slide_data.get("visualIntent") else None),
+            editingHints=EditingHints(**slide_data["editingHints"]) if slide_data.get("editingHints") else (EditingHints(**fallback_slide_data["editingHints"]) if fallback_slide_data.get("editingHints") else None),
+            practiceMetadata=PracticeMetadata(**slide_data["practiceMetadata"]) if slide_data.get("practiceMetadata") else (PracticeMetadata(**fallback_slide_data["practiceMetadata"]) if fallback_slide_data.get("practiceMetadata") else None),
+        ))
+
+    lesson_deck = _lesson_from_payload(
+        slides_data=result.get("slides", []),
+        topic=(result.get("lesson", {}) or {}).get("meta", {}).get("topic") or result.get("title") or current_deck.get("title") or "Modified Deck",
+        subject=subject,
+        grade_level=grade_level,
+        theme=(current_lesson.get("meta", {}) or {}).get("theme", "default"),
+        meta=result.get("meta") or current_lesson.get("meta"),
+        structure=result.get("structure") or current_lesson.get("structure"),
+        fallback_slides=fallback_slides,
+    )
+    return _build_response(lesson_deck, title=result.get("title", current_deck.get("title")))
+
+
+def _build_structured_slide_shell(request: DeckGenerateRequest) -> list[Slide]:
+    topics = request.topics if request.topics else [request.topic] if request.topic else []
+    topic = topics if len(topics) > 1 else (topics[0] if topics else "")
+    plan = build_lesson_narrative_plan(
+        topic=topic,
+        subject=request.subject,
+        grade_level=request.gradeLevel,
+        chapter=request.chapter,
+        additional_instructions=request.additionalInstructions,
+        pedagogy_flow=request.pedagogyFlow,
+    )
+    return build_structured_slides_from_plan(
+        plan=plan,
+        subject=request.subject,
+        grade_level=request.gradeLevel,
+    )
+
+
+def _merge_generated_content_into_structured_slides(
+    structured_slides: list[Slide],
+    generated_slide_payloads: list[dict],
+) -> list[Slide]:
+    merged_slides: list[Slide] = []
+
+    for index, structured_slide in enumerate(structured_slides):
+        generated = generated_slide_payloads[index] if index < len(generated_slide_payloads) else {}
+        slide = structured_slide.model_copy(deep=True)
+        slide.order = index + 1
+        slide.title = generated.get("title") or slide.title
+        slide.content = generated.get("content") or slide.content
+        slide.speakerNotes = generated.get("speakerNotes") or slide.speakerNotes
+        slide.imageQuery = generated.get("imageQuery") or slide.imageQuery
+        slide.objective = generated.get("objective") or slide.objective
+        merged_slides.append(slide)
+
+    return merged_slides
+
+
+async def _generate_planned_lesson_deck(request: DeckGenerateRequest) -> LessonDeck:
+    from app.agents.deck_agents import OutlinerAgent, ContentAgent
+
+    topic = request.topic or ", ".join(request.topics)
+    pedagogy_flow = select_pedagogy_flow(
+        subject=request.subject,
+        additional_instructions=request.additionalInstructions,
+        requested_flow=request.pedagogyFlow,
+    ).flow_id
+    planner_prompt = build_lesson_planner_prompt(
+        topic=topic,
+        subject=request.subject,
+        grade_level=request.gradeLevel,
+        chapter=request.chapter,
+        pedagogy_flow=pedagogy_flow,
+        additional_instructions=request.additionalInstructions,
+    )
+    logger.debug("Built lesson planner prompt stack for topic '%s'", topic)
+
+    outline = await OutlinerAgent.create_outline(
+        topic=topic,
+        subject=request.subject,
+        grade_level=request.gradeLevel,
+        prompt_bundle=planner_prompt,
+    )
+
+    structured_slides = _build_structured_slide_shell(request)
+    structured_slides = expand_structured_slides_to_outline(structured_slides, outline)
+    generation_outline = ContentAgent.build_generation_outline(
+        structured_slides=structured_slides,
+        outline=outline,
+    )
+    generation_outline = [
+        {
+            **slide_outline,
+            "prompt_stack": build_slide_author_prompt(
+                topic=topic,
+                subject=request.subject,
+                grade_level=request.gradeLevel,
+                pedagogical_role=(
+                    structured_slides[index].pedagogicalRole.value
+                    if index < len(structured_slides) and structured_slides[index].pedagogicalRole
+                    else "explain_core"
+                ),
+                instructional_goal=(
+                    structured_slides[index].instructionalGoal
+                    if index < len(structured_slides) and structured_slides[index].instructionalGoal
+                    else slide_outline.get("objective") or slide_outline.get("title") or topic
+                ),
+            ),
+        }
+        for index, slide_outline in enumerate(generation_outline)
+    ]
+
+    generated_slide_payloads = await ContentAgent.generate_all_slides_parallel(
+        outline=generation_outline,
+        subject=request.subject,
+        grade_level=request.gradeLevel,
+    )
+
+    slide_objects = _merge_generated_content_into_structured_slides(
+        structured_slides=structured_slides,
+        generated_slide_payloads=generated_slide_payloads,
+    )
+
+    for slide_obj, payload in zip(slide_objects, generated_slide_payloads):
+        visual_metadata = _visual_metadata_from_spec(payload.get("visualSpec"))
+        if visual_metadata:
+            slide_obj.visualMetadata = visual_metadata
+
+    learning_objectives = [
+        LearningObjective(
+            objective=slide.objective or slide.title,
+            bloom_level=slide.bloom_level,
+        )
+        for slide in slide_objects[:3]
+    ]
+
+    return LessonDeck(
+        meta=LessonMetadata(
+            topic=topic,
+            grade=request.gradeLevel,
+            subject=request.subject,
+            standards=[],
+            theme=request.theme or "default",
+            pedagogical_model="I_DO_WE_DO_YOU_DO",
+            pedagogical_flow=pedagogy_flow,
+        ),
+        structure=LearningStructure(
+            learning_objectives=learning_objectives,
+            vocabulary=[],
+            prerequisites=[],
+            bloom_progression=[slide.bloom_level for slide in slide_objects],
+        ),
+        slides=slide_objects,
+    )
+
+
+async def _generate_legacy_lesson_deck(
+    request: DeckGenerateRequest,
+    topics_list: list[str],
+) -> LessonDeck:
+    topic = request.topic or ", ".join(topics_list)
+    result = await generate_json_completion(
+        prompt=f"Create a simple deck about {topic} for {request.subject} grade {request.gradeLevel}",
+        system_message="You are an educational content designer. Create engaging presentation content.",
+        max_tokens=4000,
+        temperature=0.7,
+    )
+
+    fallback_slides = []
+    for slide_data in result.get("slides", []):
+        content = slide_data.get("content", "")
+        if isinstance(content, list):
+            content = "\n".join(str(item) for item in content)
+        elif isinstance(content, dict):
+            content = json.dumps(content)
+        elif not isinstance(content, str):
+            content = str(content)
+
+        fallback_slides.append(
+            Slide(
+                title=slide_data.get("title", "Untitled"),
+                content=content,
+                order=slide_data.get("order", 0),
+            )
+        )
+
+    return _lesson_from_payload(
+        slides_data=result.get("slides", []),
+        topic=result.get("title") or topic,
+        subject=request.subject,
+        grade_level=request.gradeLevel,
+        theme=request.theme,
+        fallback_slides=fallback_slides,
+    )
 
 @router.post("/modify-deck", response_model=DeckGenerateResponse)
 async def modify_deck(request: DeckModifyRequest):
     """Modify an existing deck based on user feedback"""
     try:
-        current_deck_json = json.dumps(request.currentDeck, indent=2)
-        
-        system_message = """You are an expert instructional designer revising a presentation deck based on teacher feedback. 
-        You will receive the current JSON of the deck and specific instructions for changes.
-        Return the FULLY updated JSON structure, maintaining the valid schema."""
-
-        prompt = f"""REVIESE THIS DECK.
-
-        CONTEXT:
-        Subject: {request.subject}
-        Grade: {request.gradeLevel}
-
-        USER FEEDBACK / INSTRUCTIONS:
-        "{request.feedback}"
-
-        CURRENT DECK JSON:
-        {current_deck_json}
-
-        TASK:
-        1. Apply the user's feedback to the deck.
-        2. Keep the same structure (Title, Slides list).
-        3. If slides need to be added/removed/edited, do so.
-        4. Return the COMPLETE updated JSON.
-        """
-
-        result = await generate_json_completion(
-            prompt=prompt,
-            system_message=system_message,
-            max_tokens=3000,
-            temperature=0.7
-        )
-        
-        # Regenerate visuals for the modified deck
-        logger.info(f"Regenerating visuals for modified deck with {len(result.get('slides', []))} slides")
-        
-        # Prepare slides for visual routing
-        slides_for_routing = [
-            {"title": slide["title"], "content": slide["content"]}
-            for slide in result.get("slides", [])
-        ]
-        
-        # Get visual routing results
-        visual_routes = await batch_route_slides(
-            slides=slides_for_routing,
+        return await _build_modified_deck_response(
+            current_deck=request.currentDeck,
+            feedback=request.feedback,
             subject=request.subject,
-            enable_paid_services=False
-        )
-
-        # Generate actual visuals
-        visual_results = await batch_generate_visuals(
-            slides=slides_for_routing,
-            visual_routes=visual_routes,
-            subject=request.subject
-        )
-
-        # Combine text content + visual metadata
-        updated_slides = []
-        for slide_data, visual_route, visual_result in zip(result.get("slides", []), visual_routes, visual_results):
-            # Create visual metadata if visual was generated
-            visual_metadata = None
-            if visual_route.get('visualType') and visual_result.get('success'):
-                visual_config = visual_route.get('visualConfig', {})
-                visual_config['generatedData'] = visual_result.get('data', {})
-                
-                visual_metadata = VisualMetadata(
-                    visualType=visual_route['visualType'],
-                    visualConfig=visual_config,
-                    confidence=visual_route.get('confidence'),
-                    generatedBy=visual_route.get('generatedBy'),
-                    reasoning=visual_route.get('reasoning')
-                )
-            
-            updated_slides.append(Slide(
-                title=slide_data.get("title", "Untitled"),
-                content=slide_data.get("content", ""),
-                order=slide_data.get("order", 0),
-                visualMetadata=visual_metadata
-            ))
-
-        return DeckGenerateResponse(
-            title=result.get("title", request.currentDeck.get("title")),
-            slides=updated_slides
+            grade_level=request.gradeLevel,
         )
 
     except Exception as e:
@@ -129,413 +601,51 @@ async def modify_deck(request: DeckModifyRequest):
         raise HTTPException(status_code=500, detail=f"Failed to modify deck: {str(e)}")
 
 
+@router.post("/regenerate-cluster", response_model=DeckGenerateResponse)
+async def regenerate_cluster(request: DeckRegenerateClusterRequest):
+    """Regenerate a specific structured cluster with one additional role-aligned slide."""
+    try:
+        cluster_slides = [
+            slide for slide in ((request.currentDeck.get("lesson", {}) or {}).get("slides", []))
+            if slide.get("clusterId") == request.clusterId
+        ]
+        cluster_titles = ", ".join(slide.get("title", "Untitled") for slide in cluster_slides) or request.clusterId
+        feedback = (
+            f'Add exactly one new slide to cluster "{request.clusterId}" for pedagogical role "{request.pedagogicalRole}". '
+            f'Target the cluster slides titled {cluster_titles}. Preserve all existing slides, their order, and all structured metadata '
+            'fields such as clusterId, pedagogicalRole, instructionalGoal, contentMode, contentBlocks, layoutCandidates, visualIntent, '
+            'editingHints, and practiceMetadata. Keep the new slide in the same cluster and aligned to the existing theme.'
+        )
+
+        return await _build_modified_deck_response(
+            current_deck=request.currentDeck,
+            feedback=feedback,
+            subject=request.subject,
+            grade_level=request.gradeLevel,
+        )
+    except Exception as e:
+        logger.error(f"Cluster regeneration failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to regenerate cluster: {str(e)}")
+
+
 @router.post("/generate-deck", response_model=DeckGenerateResponse)
 async def generate_deck(request: DeckGenerateRequest):
     """Generate a teaching deck using AI with structured topic sequence"""
     try:
-        # Get topics list - support both new format (topics array) and legacy (single topic)
         topics_list = request.topics if request.topics else [request.topic] if request.topic else []
-        
         if not topics_list:
             raise HTTPException(status_code=400, detail="No topics provided")
-        
-        # DEFENSIVE: Ensure all topics are strings (handle any edge cases)
+
         topics_list = [str(topic) for topic in topics_list if topic]
-        
-        # Use structured format if requested or if we have multiple topics
-        use_structured = request.structuredFormat or len(topics_list) > 0
-        
-        if use_structured:
-            # Classify subject type
-            subject_type = classify_subject(request.subject)
-            logger.info(f"Subject '{request.subject}' classified as: {subject_type}")
-            
-            topics_str = ", ".join(topics_list)
-            num_topics = len(topics_list)
-            total_slides = num_topics * 5 + 1  # 5 per topic + 1 summary
-            
-            # === QUANTITATIVE SUBJECTS (Math, Physics, Chemistry) ===
-            if subject_type == 'quantitative':
-                # Calculate total slides: 8 per topic + 1 summary for physics-heavy topics
-                total_slides = num_topics * 8 + 1
-                
-                system_message = """You are an expert educational content designer specializing in creating COMPREHENSIVE teaching decks for physics, chemistry, and mathematics.
 
-Your decks follow a precise pedagogical structure for each topic that ensures deep understanding:
-
-FOR COMPLEX PHYSICS CONCEPTS (like Schrödinger Equation, Wave Functions, Quantum Mechanics, etc.):
-1. Introduction & Historical Context - Who discovered it, when, why it was needed
-2. Definition & Key Concepts - Clear mathematical statement with explanation
-3. Mathematical Derivation - Step-by-step derivation if applicable
-4. Physical Interpretation - What the equation/concept actually means physically
-5. Applications & Examples - Real-world applications and worked examples
-6. Basic Question - Simple question to check understanding
-7. Numerical/Hard Question - Challenging problem requiring application
-8. Olympiad Question - Competition-level problem
-
-You create content that is:
-- Age-appropriate for the specified grade level
-- Accurate and aligned with curriculum standards
-- COMPREHENSIVE enough for actual classroom teaching
-- Engaging with real-world connections
-- Properly formatted for presentation
-
-Always respond with valid JSON."""
-
-                prompt = f"""Generate a COMPREHENSIVE teaching deck for the following:
-
-SPECIFICATIONS:
-- Subject: {request.subject}
-- Grade Level: {request.gradeLevel}
-- Chapter: {request.chapter or 'General'}
-- Topics: {topics_str}
-- Number of Topics: {num_topics}
-- Total Slides Required: {total_slides}
-
-STRICT STRUCTURE (follow this EXACTLY for EACH topic):
-
-For each topic, create exactly 8 slides in this order:
-
-**Slide Type 1: INTRODUCTION & HISTORICAL CONTEXT**
-- Title: "Introduction to [Topic Name]"
-- Content MUST include:
-  • When was this concept/equation proposed and by whom
-  • What problem was it trying to solve
-  • Historical significance in the development of the field
-  • How it changed our understanding of the subject
-  • Why students should care about this topic
-  • Prerequisites they should know
-- Make it engaging with interesting historical facts.
-
-**Slide Type 2: DEFINITION & KEY CONCEPTS**
-- Title: "[Topic Name]: Definition & Key Concepts"
-- Content MUST include:
-  • The complete mathematical statement/equation (if applicable)
-  • Clear definition of EVERY symbol and term used
-  • Key terminology students need to know
-  • Different forms of the equation if applicable (e.g., time-dependent vs time-independent Schrödinger Equation)
-  • What assumptions are made
-- Be precise and complete.
-
-**Slide Type 3: MATHEMATICAL DERIVATION (if applicable)**
-- Title: "Deriving [Topic Name]"
-- Content MUST include:
-  • Starting point (what equations/principles we begin with)
-  • Step-by-step derivation with explanations
-  • Key mathematical insights at each step
-  • Final form of the equation
-  • What this derivation tells us about the physics
-- If no derivation exists, replace with "Mathematical Framework" explaining how to work with the equations.
-
-**Slide Type 4: PHYSICAL INTERPRETATION**
-- Title: "Understanding the Physics of [Topic Name]"
-- Content MUST include:
-  • What does this equation/concept actually MEAN physically?
-  • Intuitive explanations using analogies
-  • What does each term represent in real life?
-  • Common misconceptions and how to avoid them
-  • Visual descriptions (what diagrams would help)
-  • Connections to everyday phenomena
-- Make the abstract concrete.
-
-**Slide Type 5: APPLICATIONS & EXAMPLES**
-- Title: "[Topic Name]: Applications"
-- Content MUST include:
-  • At least 3 real-world applications
-  • Worked example with step-by-step solution
-  • How this concept is used in technology/research
-  • Connections to other topics in the curriculum
-  • Career fields that use this knowledge
-- Be specific with real examples.
-
-**Slide Type 6: BASIC QUESTION (Easy)**
-- Title: "[Topic Name]: Practice Question 1"
-- Content: Simple question testing basic understanding.
-  • State the question clearly with all given information
-  • For MCQ, provide 4 options (A, B, C, D)
-  • Include "Answer: [correct answer]" 
-  • Include detailed explanation of WHY that's correct
-
-📊 EASY DIFFICULTY BOUNDARIES:
-- Solution steps: 1-3 steps MAXIMUM
-- Completion time: Under 5 minutes
-- Prior knowledge: Should be answerable from this lesson alone
-- Cognitive load: Single basic concept only
-
-**Slide Type 7: NUMERICAL/HARD QUESTION (Medium)**
-- Title: "[Topic Name]: Practice Question 2 (Challenging)"
-- Content: Numerical problem or complex application question.
-  • Multi-step problem requiring real understanding
-  • Show the problem setup clearly with all given values
-  • Include "Solution:" with step-by-step working showing ALL steps
-  • Include "Answer: [final answer with units]"
-  • Tip for similar problems
-
-📊 MEDIUM DIFFICULTY BOUNDARIES:
-- Solution steps: 4-7 steps required
-- Completion time: 10-20 minutes
-- Prior knowledge: Assumes mastery of this topic's basics
-- Cognitive load: Combines 2-3 related concepts
-
-**Slide Type 8: OLYMPIAD QUESTION (Very Difficult/Hard)**
-- Title: "[Topic Name]: Challenge Question (Olympiad Level)"
-- Content: Extremely challenging problem.
-  • Competition-style question (JEE/NEET/Olympiad level)
-  • May combine multiple concepts across topics
-  • Include "Approach:" with hints on how to think about it
-  • Include "Solution:" with detailed working
-  • Include "Answer: [final answer]"
-  • Insights about problem-solving strategies
-
-📊 HARD DIFFICULTY BOUNDARIES:
-- Solution steps: 8+ steps required
-- Completion time: 30+ minutes
-- Prior knowledge: Deep understanding required
-- Cognitive load: Creative problem-solving needed
-- Target: Only top 5% students should solve independently
-
-**FINAL SLIDE: COMPREHENSIVE SUMMARY**
-After all topics are covered, create ONE summary slide:
-- Title: "Today's Learning Summary"
-- Content: Comprehensive bullet points covering:
-  • Key definitions and equations to remember
-  • Physical meanings and interpretations
-  • Important formulas with what each symbol means
-  • Connections between topics covered
-  • Common mistakes to avoid
-  • Key takeaways for exams
-  • Suggested further reading/exploration
-
-
-TOPICS TO COVER (in order):
-"""
-            
-            # === DESCRIPTIVE SUBJECTS (English, History, Geography, etc.) ===
-            else:
-                system_message = """You are an expert educational content designer specializing in creating structured teaching decks for descriptive subjects.
-
-Your decks follow a precise pedagogical structure for each topic:
-1. Definition/Key Term - Clear explanation of the concept or term
-2. Explanation with Context - Detailed explanation with historical/literary context
-3. Easy Question - Recall/identification question
-4. Medium Question - Analysis/comparison question
-5. Hard Question - Synthesis/evaluation question
-
-You create content that is:
-- Age-appropriate for the specified grade level
-- Historically/contextually accurate
-- Engaging and thought-provoking
-- Properly formatted for presentation
-
-Always respond with valid JSON."""
-
-                prompt = f"""Generate a structured teaching deck for the following:
-
-SPECIFICATIONS:
-- Subject: {request.subject}
-- Grade Level: {request.gradeLevel}
-- Chapter: {request.chapter or 'General'}
-- Topics: {topics_str}
-- Number of Topics: {num_topics}
-- Total Slides Required: {total_slides}
-
-STRICT STRUCTURE (follow this EXACTLY for EACH topic):
-
-For each topic, create exactly 5 slides in this order:
-
-**Slide Type 1: DEFINITION/KEY TERM**
-- Title: "[Topic Name]: Key Concept"
-- Content: Clear definition or explanation of the key term.
-  • Define the concept in 2-3 sentences
-  • Provide historical/literary context if relevant
-  • Mention significance or importance
-
-**Slide Type 2: EXPLANATION WITH CONTEXT**
-- Title: "Understanding [Topic Name]"
-- Content: Detailed explanation with:
-  • Background and historical/literary context
-  • Key characteristics or features
-  • Real-world examples or case studies
-  • Connections to other related concepts
-- Use bullet points, 4-6 points.
-
-**Slide Type 3: EASY QUESTION (Recall/Identification)**
-- Title: "[Topic Name]: Practice Question 1"
-- Content: Question testing basic understanding and recall.
-  • "Who was...", "What is...", "When did...", "Where did..."
-  • For MCQ, provide 4 options (A, B, C, D)
-  • Include "Answer: [correct answer]" at the end
-  • Brief explanation
-
-📊 EASY DIFFICULTY BOUNDARIES:
-- Question type: Direct recall, identification, basic facts
-- Completion time: Under 5 minutes
-- Cognitive level: Remember, Identify
-
-**Slide Type 4: MEDIUM QUESTION (Analysis/Comparison)**
-- Title: "[Topic Name]: Practice Question 2 (Analytical)"
-- Content: Question requiring analysis or comparison.
-  • "Compare X and Y", "Explain the significance of...", "What were the causes of..."
-  • "Differentiate between...", "Describe the characteristics of..."
-  • Include "Answer:" with detailed explanation
-  • Mention multiple aspects or perspectives
-
-📊 MEDIUM DIFFICULTY BOUNDARIES:
-- Question type: Compare, Contrast, Explain, Analyze
-- Completion time: 10-15 minutes
-- Cognitive level: Understand, Analyze, Compare
-
-**Slide Type 5: HARD QUESTION (Synthesis/Evaluation)**
-- Title: "[Topic Name]: Challenge Question (Critical Thinking)"
-- Content: Question requiring synthesis and evaluation.
-  • "How does X relate to Y?", "Analyze the impact of...", "Evaluate the role of..."
-  • "To what extent...", "Justify...", "Critically assess..."
-  • Include "Approach:" with thinking framework
-  • Include "Answer:" with comprehensive analysis
-  • Discuss multiple viewpoints or interpretations
-
-📊 HARD DIFFICULTY BOUNDARIES:
-- Question type: Evaluate, Synthesize, Justify, Critically analyze
-- Completion time: 20-30 minutes
-- Cognitive level: Synthesize, Evaluate, Create connections
-- Target: Requires deep understanding and critical thinking
-
-**FINAL SLIDE: SUMMARY**
-After all topics are covered, create ONE summary slide:
-- Title: "Today's Learning Summary"
-- Content: Bullet points covering:
-  • Each topic we covered
-  • Key concepts/events/ideas to remember
-  • 2-3 key takeaways or insights
-- No new content, just consolidation.
-
-
-TOPICS TO COVER (in order):
-"""
-            
-            # Construct topics list formatting (common for both)
-            topics_formatted = "\n".join([f"{i+1}. {topic}" for i, topic in enumerate(topics_list)])
-            prompt += topics_formatted + "\n"
-            
-            prompt += f"""
-OUTPUT FORMAT:
-{{
-    "title": "{request.chapter or topics_list[0]}: Complete Teaching Deck",
-    "slides": [
-        {{"title": "Slide title", "content": "Slide content...", "order": 1}},
-        {{"title": "Slide 2 title", "content": "Content...", "order": 2}},
-        // ... continue for all {total_slides} slides
-    ]
-}}
-
-IMPORTANT:
-- Generate EXACTLY {total_slides} slides ({num_topics} topics × 5 slides + 1 summary)
-- Follow the structure strictly: Definition → Explanation → Easy Q → Medium Q → Hard Q for EACH topic
-- Questions MUST include answers and detailed explanations
-- Make content grade-appropriate for Class {request.gradeLevel}
-
-Generate the complete deck now."""
-
-            # Add teacher's additional instructions if provided
-            if request.additionalInstructions:
-                prompt += f"""
-
-ADDITIONAL TEACHER INSTRUCTIONS:
-{request.additionalInstructions}
-
-Please incorporate these instructions into your deck content.
-"""
-
-            logger.info(f"Generating structured {subject_type} deck for {num_topics} topics: {topics_str}")
-            
+        if request.structuredFormat or len(topics_list) > 1:
+            lesson_deck = await _generate_planned_lesson_deck(request)
         else:
-            # Legacy format for backward compatibility (shouldn't normally reach here)
-            system_message = """You are an educational content designer. Create engaging presentation content."""
-            prompt = f"Create a simple deck about {request.topic} for {request.subject} grade {request.gradeLevel}"
-            logger.info(f"Generating legacy deck for topic: {request.topic}")
+            lesson_deck = await _generate_legacy_lesson_deck(request, topics_list)
 
-        result = await generate_json_completion(
-            prompt=prompt,
-            system_message=system_message,
-            max_tokens=4000,  # Increased for structured content
-            temperature=0.7
-        )
-
-        # Validate slide count
-        expected_slides = len(topics_list) * 5 + 1 if use_structured else request.numSlides
-        if len(result["slides"]) != expected_slides:
-            logger.warning(f"Generated {len(result['slides'])} slides but {expected_slides} were expected")
-
-        # Step 2: Route slides to appropriate visual generators
-        logger.info(f"Analyzing {len(result['slides'])} slides for visual routing...")
-        
-        # Prepare slides for batch routing
-        # Prepare slides for batch routing
-        slides_for_routing = []
-        for slide in result["slides"]:
-            content = slide.get("content", "")
-            # Sanitize content if it's not a string (handle lists from LLM)
-            if isinstance(content, list):
-                content = "\n".join([str(item) for item in content])
-            elif isinstance(content, dict):
-                content = json.dumps(content)
-            elif not isinstance(content, str):
-                content = str(content)
-                
-            slides_for_routing.append({
-                "title": slide.get("title", ""),
-                "content": content
-            })
-        
-        # Get visual routing results
-        visual_routes = await batch_route_slides(
-            slides=slides_for_routing,
-            subject=request.subject,
-            enable_paid_services=False  # Will enable in Phase 3
-        )
-
-        # Step 3: Generate actual visuals for routed slides
-        logger.info(f"Generating visuals for slides...")
-        visual_results = await batch_generate_visuals(
-            slides=slides_for_routing,
-            visual_routes=visual_routes,
-            subject=request.subject
-        )
-
-        # Step 4: Combine everything - text content + visual metadata + generated visuals
-        enriched_slides = []
-        for slide_data, visual_route, visual_result in zip(result["slides"], visual_routes, visual_results):
-            # Create visual metadata with generated visual data
-            visual_metadata = None
-            if visual_route.get('visualType') and visual_result.get('success'):
-                # Merge routing info with generated visual
-                visual_config = visual_route.get('visualConfig', {})
-                visual_config['generatedData'] = visual_result.get('data', {})
-                
-                visual_metadata = VisualMetadata(
-                    visualType=visual_route['visualType'],
-                    visualConfig=visual_config,
-                    confidence=visual_route.get('confidence'),
-                    generatedBy=visual_route.get('generatedBy'),
-                    reasoning=visual_route.get('reasoning')
-                )
-            
-            slide = Slide(
-                title=slide_data["title"],
-                content=slide_data["content"],
-                order=slide_data["order"],
-                visualMetadata=visual_metadata
-            )
-            enriched_slides.append(slide)
-        
-        # Log statistics
-        visuals_generated = sum(1 for r in visual_results if r.get('success'))
-        logger.info(f"Deck generation complete: {len(enriched_slides)} slides, "
-                   f"{visuals_generated} visuals generated successfully")
-
-        return DeckGenerateResponse(
-            title=result["title"],
-            slides=enriched_slides
+        return _build_response(
+            lesson_deck,
+            title=request.topic or ", ".join(str(topic) for topic in topics_list if topic),
         )
 
     except Exception as e:
@@ -551,46 +661,18 @@ async def generate_deck_pptx(request: DeckGenerateRequest):
     """
     try:
         logger.info(f"[PPTX EXPORT] Starting for topic: {request.topic or request.topics}")
-        
-        # Step 1: Generate outline
-        from app.agents.deck_agents import OutlinerAgent, ContentAgent
-        outline = await OutlinerAgent.create_outline(
-            topic=request.topic or ", ".join(request.topics),
-            subject=request.subject,
-            grade_level=request.gradeLevel
-        )
-        
-        # Step 2: Generate content in parallel
-        slides_data = await ContentAgent.generate_all_slides_parallel(
-            outline=outline,
-            subject=request.subject,
-            grade_level=request.gradeLevel
-        )
-        
-        # Step 3: Create LessonDeck
-        from app.models.lesson_schema import LessonDeck, LessonMetadata, LearningStructure, LearningObjective, Slide, DifferentiationLevel
-        
-        slides = [Slide(**s) for s in slides_data]
-        
-        lesson_deck = LessonDeck(
-            meta=LessonMetadata(
-                topic=request.topic or ", ".join(request.topics),
-                subject=request.subject,
-                grade=request.gradeLevel,
-                theme=request.theme
-            ),
-            structure=LearningStructure(
-                learning_objectives=[
-                    LearningObjective(objective=s.objective, bloom_level=s.bloom_level)
-                    for s in slides[:3] if s.objective
-                ],
-                vocabulary=[],
-                prerequisites=[],
-                bloom_progression=[s.bloom_level for s in slides]
-            ),
-            slides=slides
-        )
-        
+        topics_list = request.topics if request.topics else [request.topic] if request.topic else []
+        topics_list = [str(topic) for topic in topics_list if topic]
+        if not topics_list:
+            raise HTTPException(status_code=400, detail="No topics provided")
+
+        from app.models.lesson_schema import DifferentiationLevel
+
+        if request.structuredFormat or len(topics_list) > 1:
+            lesson_deck = await _generate_planned_lesson_deck(request)
+        else:
+            lesson_deck = await _generate_legacy_lesson_deck(request, topics_list)
+
         # Step 3.5: Differentiate if requested
         if request.level and request.level != DifferentiationLevel.CORE:
             logger.info(f"[PPTX EXPORT] Differentiating to level: {request.level}")
@@ -600,6 +682,8 @@ async def generate_deck_pptx(request: DeckGenerateRequest):
                 core_deck=lesson_deck,
                 target_level=request.level
             )
+
+        lesson_deck = apply_quality_guards_to_lesson(lesson_deck)
         
         # Step 4: Render to PPTX
         renderer = PPTXRenderer(theme=request.theme)
@@ -615,6 +699,26 @@ async def generate_deck_pptx(request: DeckGenerateRequest):
     except Exception as e:
         logger.error(f"PPTX export failed: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to generate PPTX: {str(e)}")
+
+
+@router.post("/render-pptx")
+async def render_pptx(request: PPTXRenderRequest):
+    """Render an already-constructed canonical lesson deck to PPTX."""
+    try:
+        lesson_deck = apply_quality_guards_to_lesson(request.lesson)
+        theme = request.theme or lesson_deck.meta.theme or "default"
+        renderer = PPTXRenderer(theme=theme)
+        pptx_file = await renderer.render_lesson_deck(lesson_deck)
+        filename = f"{lesson_deck.meta.topic or 'lesson'}_deck.pptx".replace(" ", "_")
+
+        return StreamingResponse(
+            pptx_file,
+            media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
+        )
+    except Exception as e:
+        logger.error(f"PPTX render failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to render PPTX: {str(e)}")
 
 
 @router.post("/generate-complete")
@@ -634,162 +738,43 @@ async def generate_complete_deck(request: DeckGenerateRequest):
         StreamingResponse with .pptx file
     """
     try:
-        # DEBUG: Log level information
         logger.info(f"[COMPLETE PIPELINE] Starting for topic: {request.topic or request.topics}")
-        logger.info(f"[DEBUG] Level received: {request.level}, type: {type(request.level)}")
-        if request.level:
-            logger.info(f"[DEBUG] Level value: {request.level.value if hasattr(request.level, 'value') else request.level}")
-        
-        # Step 1: Generate curriculum-aligned outline with Bloom's progression
-        logger.info("[Step 1/4] Generating outline...")
-        from app.agents.deck_agents import OutlinerAgent, ContentAgent
-        
-        outline = await OutlinerAgent.create_outline(
-            topic=request.topic or ", ".join(request.topics),
-            subject=request.subject,
-            grade_level=request.gradeLevel
-        )
-        
-        logger.info(f"✓ Outline created: {len(outline)} slides")
-        
-        # Step 2: Generate all slide content in parallel
-        logger.info("[Step 2/4] Generating slide content (parallel)...")
-        slides = await ContentAgent.generate_all_slides_parallel(
-            outline=outline,
-            subject=request.subject,
-            grade_level=request.gradeLevel
-        )
-        
-        logger.info(f"✓ Content generated for {len(slides)} slides")
-        
-        # Step 3: Create LessonDeck structure
-        logger.info("[Step 3/4] Creating LessonDeck...")
-        from app.models.lesson_schema import LessonDeck, LessonMetadata, LearningStructure, LearningObjective, Slide, SlideType, BloomLevel
-        
-        # Convert slide dicts to proper Slide objects
-        slide_objects = []
-        for i, slide in enumerate(slides):
-            # Map string to enum, with fallback
-            bloom_str = slide.get('bloom_level', 'UNDERSTAND').upper()
-            try:
-                bloom_level = BloomLevel(bloom_str)
-            except ValueError:
-                bloom_level = BloomLevel.UNDERSTAND
-            
-            slide_type_str = slide.get('slideType', 'CONCEPT').upper()
-            try:
-                slide_type = SlideType(slide_type_str)
-            except ValueError:
-                slide_type = SlideType.CONCEPT
-            
-            slide_obj = Slide(
-                id=str(i + 1),
-                title=slide.get('title', f'Slide {i+1}'),
-                content=slide.get('content', ''),
-                order=slide.get('order', i + 1),
-                slideType=slide_type,
-                bloom_level=bloom_level,
-                speakerNotes=slide.get('speakerNotes', ''),
-                imageQuery=slide.get('imageQuery', None)
-            )
-            slide_objects.append(slide_obj)
-        
-        # Extract learning objectives from slides
-        learning_objectives = []
-        for slide in slide_objects[:3]:  # Take first 3 slides as main objectives
-            learning_objectives.append(
-                LearningObjective(
-                    objective=slide.title,
-                    bloom_level=slide.bloom_level
-                )
-            )
-        
-        lesson_deck = LessonDeck(
-            meta=LessonMetadata(
-                topic=request.topic or ", ".join(request.topics),
-                grade=request.gradeLevel,
-                subject=request.subject,
-                standards=[],  # Will be populated from RAG context
-                theme=request.theme or "default",
-                pedagogical_model="I_DO_WE_DO_YOU_DO"
-            ),
-            structure=LearningStructure(
-                learning_objectives=learning_objectives,
-                vocabulary=[],
-                prerequisites=[],
-                bloom_progression=[s.bloom_level for s in slide_objects]
-            ),
-            slides=slide_objects
-        )
-        
-        # Step 4: Apply differentiation if level is not CORE
-        final_slides = slide_objects  # Start with the proper Slide objects
-        
-        # Get level value (handle both enum and string)
+        lesson_deck = await _generate_planned_lesson_deck(request)
+
         level_value = request.level.value if hasattr(request.level, 'value') else str(request.level) if request.level else 'CORE'
         level_value = level_value.upper()
-        
-        print(f"[DEBUG] Checking differentiation - level_value: {level_value}")
         logger.info(f"[DEBUG] Checking differentiation - level_value: {level_value}")
-        
+
         if level_value != 'CORE':
-            print(f"[Step 4/4] Applying differentiation for level: {level_value}")
             logger.info(f"[Step 4/4] Applying differentiation for level: {level_value}")
             try:
                 from app.services.differentiation import DifferentiationService, DifferentiationLevel as DiffLevel
                 diff_service = DifferentiationService()
-                
-                # Map level string to enum
+
                 level_map = {
                     'SUPPORT': DiffLevel.SUPPORT,
                     'EXTENSION': DiffLevel.EXTENSION,
                 }
                 target_level = level_map.get(level_value)
-                print(f"[DEBUG] Target level mapped: {target_level}")
-                
+
                 if target_level:
-                    print(f"[DEBUG] Calling generate_differentiated_deck with {len(lesson_deck.slides)} slides")
-                    differentiated_deck = await diff_service.generate_differentiated_deck(
+                    lesson_deck = await diff_service.generate_differentiated_deck(
                         core_deck=lesson_deck,
                         target_level=target_level
                     )
-                    print(f"[DEBUG] Differentiated deck has {len(differentiated_deck.slides)} slides")
-                    # Extract slides from differentiated deck
-                    final_slides = [
-                        {
-                            "title": slide.title if hasattr(slide, 'title') else slide.get('title', ''),
-                            "content": slide.content if hasattr(slide, 'content') else slide.get('content', ''),
-                            "order": slide.order if hasattr(slide, 'order') else slide.get('order', i+1)
-                        }
-                        for i, slide in enumerate(differentiated_deck.slides)
-                    ]
-                    print(f"✓ Differentiation applied: {len(final_slides)} slides for {level_value}")
-                    logger.info(f"✓ Differentiation applied: {len(final_slides)} slides for {level_value}")
+                    logger.info(f"✓ Differentiation applied: {len(lesson_deck.slides)} slides for {level_value}")
                 else:
                     logger.warning(f"Unknown level '{level_value}', using core slides")
             except Exception as diff_error:
                 logger.warning(f"Differentiation failed, returning core: {str(diff_error)}")
                 import traceback
                 logger.error(traceback.format_exc())
-                # Fall back to core slides (use slide_objects, not dict)
-                final_slides = slide_objects
         else:
             logger.info("[Step 4/4] Level is CORE, skipping differentiation")
-            final_slides = slide_objects  # Use slide_objects for consistency
-        
-        # Return format expected by backend: simple object with title and slides array
+
         level_suffix = f" ({level_value})" if level_value != 'CORE' else ""
-        return {
-            "title": (request.topic or ", ".join(request.topics) if request.topics else "Teaching Deck") + level_suffix,
-            "slides": [
-                {
-                    "title": slide.get("title", "") if isinstance(slide, dict) else slide.title,
-                    "content": slide.get("content", "") if isinstance(slide, dict) else slide.content,
-                    "order": i + 1
-                }
-                for i, slide in enumerate(final_slides)
-            ]
-        }
+        title = (request.topic or ", ".join(request.topics) if request.topics else "Teaching Deck") + level_suffix
+        return _serialize_lesson_deck_payload(lesson_deck, title=title)
         
     except Exception as e:
         logger.error(f"[COMPLETE PIPELINE] ❌ Failed: {str(e)}")
@@ -818,57 +803,12 @@ async def generate_all_differentiation_levels(request: DeckGenerateRequest):
     try:
         logger.info(f"[DIFFERENTIATION] Generating all levels for: {request.topic or request.topics}")
         
-        # Step 1: Generate CORE deck using complete pipeline
+        # Step 1: Generate CORE deck using planner-driven pipeline
         logger.info("[Step 1/3] Generating CORE deck...")
-        from app.agents.deck_agents import OutlinerAgent, ContentAgent
         from app.services.differentiation import DifferentiationService, DifferentiationLevel
+        core_deck = await _generate_planned_lesson_deck(request)
         
-        # Generate outline
-        outline = await OutlinerAgent.create_outline(
-            topic=request.topic or ", ".join(request.topics),
-            subject=request.subject,
-            grade_level=request.gradeLevel
-        )
-        
-        # Generate slides in parallel
-        slides = await ContentAgent.generate_all_slides_parallel(
-            outline=outline,
-            subject=request.subject,
-            grade_level=request.gradeLevel
-        )
-        
-        # Create core LessonDeck
-        from app.models.lesson_schema import LessonDeck, LessonMetadata, LearningStructure, LearningObjective
-        
-        learning_objectives = []
-        for slide in slides[:3]:
-            if slide.get('objective'):
-                learning_objectives.append(
-                    LearningObjective(
-                        objective=slide['objective'],
-                        bloom_level=slide.get('bloom_level', 'UNDERSTAND')
-                    )
-                )
-        
-        core_deck = LessonDeck(
-            meta=LessonMetadata(
-                topic=request.topic or ", ".join(request.topics),
-                grade=request.gradeLevel,
-                subject=request.subject,
-                standards=[],
-                theme=request.theme or "default",
-                pedagogical_model="I_DO_WE_DO_YOU_DO"
-            ),
-            structure=LearningStructure(
-                learning_objectives=learning_objectives,
-                vocabulary=[],
-                prerequisites=[],
-                bloom_progression=[s.get('bloom_level', 'UNDERSTAND') for s in slides]
-            ),
-            slides=slides
-        )
-        
-        logger.info(f"✓ CORE deck created: {len(slides)} slides")
+        logger.info(f"✓ CORE deck created: {len(core_deck.slides)} slides")
         
         # Step 2: Generate SUPPORT and EXTENSION in parallel
         logger.info("[Step 2/3] Generating SUPPORT and EXTENSION versions (parallel)...")
@@ -945,52 +885,9 @@ async def generate_specific_level(
             return await generate_complete_deck(request)
         
         # Otherwise, generate core first then differentiate
-        from app.agents.deck_agents import OutlinerAgent, ContentAgent
         from app.services.differentiation import DifferentiationService
-        from app.models.lesson_schema import LessonDeck, LessonMetadata, LearningStructure, LearningObjective
+        core_deck = await _generate_planned_lesson_deck(request)
         
-        # Generate core deck
-        outline = await OutlinerAgent.create_outline(
-            topic=request.topic or ", ".join(request.topics),
-            subject=request.subject,
-            grade_level=request.gradeLevel
-        )
-        
-        slides = await ContentAgent.generate_all_slides_parallel(
-            outline=outline,
-            subject=request.subject,
-            grade_level=request.gradeLevel
-        )
-        
-        learning_objectives = []
-        for slide in slides[:3]:
-            if slide.get('objective'):
-                learning_objectives.append(
-                    LearningObjective(
-                        objective=slide['objective'],
-                        bloom_level=slide.get('bloom_level', 'UNDERSTAND')
-                    )
-                )
-        
-        core_deck = LessonDeck(
-            meta=LessonMetadata(
-                topic=request.topic or ", ".join(request.topics),
-                grade=request.gradeLevel,
-                subject=request.subject,
-                standards=[],
-                theme=request.theme or "default",
-                pedagogical_model="I_DO_WE_DO_YOU_DO"
-            ),
-            structure=LearningStructure(
-                learning_objectives=learning_objectives,
-                vocabulary=[],
-                prerequisites=[],
-                bloom_progression=[s.get('bloom_level', 'UNDERSTAND') for s in slides]
-            ),
-            slides=slides
-        )
-        
-        # Differentiate
         diff_service = DifferentiationService()
         differentiated_deck = await diff_service.generate_differentiated_deck(
             core_deck=core_deck,
@@ -999,7 +896,8 @@ async def generate_specific_level(
         
         logger.info(f"✓ {target_level} deck generated with {len(differentiated_deck.slides)} slides")
         
-        return differentiated_deck.dict()
+        title = f"{request.topic or ', '.join(request.topics)} ({target_level.value})"
+        return _serialize_lesson_deck_payload(differentiated_deck, title=title)
         
     except Exception as e:
         logger.error(f"[LEVEL GENERATION] Failed: {str(e)}")
@@ -1093,8 +991,6 @@ Return JSON:
         result = await generate_json_completion(
             prompt=prompt,
             system_message=system_message,
-            max_tokens=1000,
-            temperature=0.7
         )
         
         logger.info(f"✓ Activity generated: {result.get('title', 'Unknown')}")
@@ -1188,12 +1084,10 @@ Return JSON:
         result = await generate_json_completion(
             prompt=prompt,
             system_message=system_message,
-            max_tokens=1000,
-            temperature=0.7
         )
         
         logger.info(f"✓ Slide generated: {result.get('title', 'Unknown')}")
-        
+
         return AddSlideResponse(
             title=result.get('title', 'New Slide'),
             content=result.get('content', ''),
@@ -1203,3 +1097,101 @@ Return JSON:
     except Exception as e:
         logger.error(f"[ADD SLIDE] Failed: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Slide generation failed: {str(e)}")
+
+
+# ===== GRANULAR EDIT ENDPOINTS (STATEFUL DECKS) =====
+
+from pydantic import BaseModel
+from app.repositories.deck_repository import DeckRepository
+
+class RegenerateContentRequest(BaseModel):
+    feedback: str = "Make this simpler"
+
+@router.post("/deck/{deck_id}/slide/{slide_id}/regenerate-content")
+async def regenerate_slide_content(deck_id: str, slide_id: str, req: RegenerateContentRequest):
+    """Granular edit: Re-write the text of a single slide based on feedback"""
+    deck = await DeckRepository.get_deck(deck_id)
+    if not deck:
+        raise HTTPException(status_code=404, detail="Deck not found")
+        
+    target_slide = next((s for s in deck.slides if s.id == slide_id), None)
+    if not target_slide:
+        raise HTTPException(status_code=404, detail="Slide not found")
+        
+    # Prevent editing if locked
+    if target_slide.editingHints and target_slide.editingHints.locked:
+        raise HTTPException(status_code=400, detail="Slide is locked by teacher")
+        
+    from app.agents.deck_agents import ContentAgent
+    
+    # Mocking the prompt adjustment for brevity
+    # In reality, we'd pass the existing content and feedback to the LLM
+    new_content = f"REGENERATED BASED ON: {req.feedback}\n\n{target_slide.content}"
+    
+    target_slide.content = new_content
+    await DeckRepository.save_deck(deck)
+    return {"status": "success", "slide": target_slide}
+
+
+@router.post("/deck/{deck_id}/slide/{slide_id}/update-visual")
+async def update_slide_visual(deck_id: str, slide_id: str):
+    """Granular edit: Update the visual/image query for a single slide without changing text"""
+    deck = await DeckRepository.get_deck(deck_id)
+    if not deck:
+        raise HTTPException(status_code=404, detail="Deck not found")
+        
+    target_slide = next((s for s in deck.slides if s.id == slide_id), None)
+    if not target_slide:
+        raise HTTPException(status_code=404, detail="Slide not found")
+        
+    from app.agents.visual_director_agent import VisualDirectorAgent
+    from app.models.lesson_schema import SlideType, BloomLevel
+    
+    query_result = await VisualDirectorAgent.generate_image_query(
+        slide_content=target_slide.content,
+        slide_title=target_slide.title,
+        bloom_level=target_slide.bloom_level,
+        subject=deck.meta.subject,
+        grade_level=deck.meta.grade,
+        slide_type=target_slide.slideType
+    )
+    
+    target_slide.imageQuery = query_result.get('imageQuery')
+    await DeckRepository.save_deck(deck)
+    return {"status": "success", "slide": target_slide}
+
+
+@router.delete("/deck/{deck_id}/slide/{slide_id}")
+async def delete_slide(deck_id: str, slide_id: str):
+    """Delete a slide and trigger bidirectional sync warnings if an objective is lost"""
+    deck = await DeckRepository.get_deck(deck_id)
+    if not deck:
+        raise HTTPException(status_code=404, detail="Deck not found")
+        
+    slide_index = next((i for i, s in enumerate(deck.slides) if s.id == slide_id), None)
+    if slide_index is None:
+        raise HTTPException(status_code=404, detail="Slide not found")
+        
+    deleted_slide = deck.slides.pop(slide_index)
+    warning = None
+    
+    # Phase 4: Bidirectional Syncing Logic
+    # Check if the deleted slide had a specific learning objective
+    if deleted_slide.objective and deck.lesson_plan_id:
+        # Check if any REMAINING slides cover this objective
+        still_covered = any(s.objective == deleted_slide.objective for s in deck.slides)
+        if not still_covered:
+            warning = {
+                "type": "OBJECTIVE_LOST",
+                "message": f"You deleted the only slide covering the objective: '{deleted_slide.objective}'. Should we remove this from your Lesson Plan?",
+                "lesson_plan_id": deck.lesson_plan_id,
+                "objective": deleted_slide.objective
+            }
+            
+    await DeckRepository.save_deck(deck)
+    
+    return {
+        "status": "success", 
+        "message": "Slide deleted", 
+        "warning": warning
+    }

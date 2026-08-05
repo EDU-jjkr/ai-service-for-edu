@@ -41,6 +41,7 @@ class LessonMetadata(BaseModel):
     standards: List[str] = []  # Aligned curriculum standards (e.g., ["RL.5.1", "RL.5.2"])
     theme: str = "default"  # PowerPoint theme name
     pedagogical_model: PedagogicalModel = PedagogicalModel.I_DO_WE_DO_YOU_DO
+    pedagogical_flow: str = "default_classroom"
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -74,6 +75,88 @@ class VisualMetadata(BaseModel):
     reasoning: Optional[str] = None  # Why this visual type was chosen
 
 
+class PedagogicalRole(str, Enum):
+    """Pedagogical roles for structured slides"""
+    HOOK = "hook"
+    EXPLAIN_CORE = "explain_core"
+    EXPLAIN_DEEPEN = "explain_deepen"
+    WORKED_EXAMPLE = "worked_example"
+    COMPARE_EXAMPLE = "compare_example"
+    GUIDED_PRACTICE = "guided_practice"
+    INDEPENDENT_PRACTICE = "independent_practice"
+    SUMMARY = "summary"
+
+
+class ContentMode(str, Enum):
+    """Primary content mode for structured slides"""
+    TEXT_ONLY = "text_only"
+    IMAGE_SUPPORT = "image_support"
+    DIAGRAM = "diagram"
+    CHART = "chart"
+    EQUATION = "equation"
+    COMPARISON = "comparison"
+    QUESTION = "question"
+
+
+class DensityLevel(str, Enum):
+    """Allowed density levels for structured slides"""
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+class ImportanceLevel(str, Enum):
+    """Allowed importance levels for structured slides"""
+    PRIMARY = "primary"
+    SECONDARY = "secondary"
+
+
+class VisualPriority(str, Enum):
+    """Allowed priorities for visual intent"""
+    REQUIRED = "required"
+    OPTIONAL = "optional"
+
+
+class VisualSourceStrategy(str, Enum):
+    """Allowed visual sourcing strategies"""
+    STOCK = "stock"
+    GENERATED = "generated"
+    DIAGRAMMATIC = "diagrammatic"
+    RENDERER_NATIVE = "renderer_native"
+
+
+class ContentBlock(BaseModel):
+    """Typed content block for schema-aware slide rendering"""
+    type: str
+    text: Optional[str] = None
+    items: List[str] = Field(default_factory=list)
+    value: Optional[str] = None
+
+
+class VisualIntent(BaseModel):
+    """Rendering intent for non-text content"""
+    purpose: str
+    assetType: str
+    priority: VisualPriority = VisualPriority.OPTIONAL
+    sourceStrategy: VisualSourceStrategy = VisualSourceStrategy.RENDERER_NATIVE
+
+
+class EditingHints(BaseModel):
+    """Editor constraints for structured slide updates"""
+    locked: bool = False
+    canAddBlocks: List[str] = Field(default_factory=list)
+    canRemoveBlocks: List[str] = Field(default_factory=list)
+    notes: Dict[str, Any] = Field(default_factory=dict)
+
+
+class PracticeMetadata(BaseModel):
+    """Practice-slide specific metadata"""
+    difficulty: Optional[str] = None
+    answerMode: Optional[str] = None
+    stepCount: Optional[int] = None
+    misconception: Optional[str] = None
+
+
 class Slide(BaseModel):
     """Individual slide in the lesson deck"""
     title: str
@@ -86,6 +169,17 @@ class Slide(BaseModel):
     imageQuery: Optional[str] = None  # Search query for stock photos (e.g., "sun shining on ocean")
     imageUrl: Optional[str] = None  # Deprecated: kept for backward compatibility
     visualMetadata: Optional[VisualMetadata] = None
+    clusterId: Optional[str] = None
+    pedagogicalRole: Optional[PedagogicalRole] = None
+    instructionalGoal: Optional[str] = None
+    contentMode: Optional[ContentMode] = None
+    contentBlocks: List[ContentBlock] = Field(default_factory=list)
+    layoutCandidates: List[str] = Field(default_factory=list)
+    density: Optional[DensityLevel] = None
+    importance: Optional[ImportanceLevel] = None
+    visualIntent: Optional[VisualIntent] = None
+    editingHints: Optional[EditingHints] = None
+    practiceMetadata: Optional[PracticeMetadata] = None
 
     @field_validator('content', mode='before')
     @classmethod
@@ -129,6 +223,7 @@ class DeckGenerateRequest(BaseModel):
     theme: str = "default"  # PowerPoint theme
     standards: List[str] = []  # Specific curriculum standards to align with
     pedagogical_model: Optional[PedagogicalModel] = PedagogicalModel.I_DO_WE_DO_YOU_DO
+    pedagogyFlow: Optional[str] = "default_classroom"
     level: Optional[DifferentiationLevel] = DifferentiationLevel.CORE
     additionalInstructions: Optional[str] = None  # Custom instructions from teacher
 
@@ -136,6 +231,10 @@ class DeckGenerateRequest(BaseModel):
 class DeckGenerateResponse(BaseModel):
     """Response from deck generation"""
     lesson: LessonDeck  # Complete lesson deck
+    title: Optional[str] = None
+    meta: Optional[Dict[str, Any]] = None
+    structure: Optional[Dict[str, Any]] = None
+    slides: List[Slide] = []
 
 
 # Keep legacy response for backward compatibility
@@ -143,6 +242,12 @@ class DeckGenerateResponseLegacy(BaseModel):
     """Legacy response format"""
     title: str
     slides: List[Slide]
+
+
+class PPTXRenderRequest(BaseModel):
+    """Render a canonical lesson deck to PPTX."""
+    lesson: LessonDeck
+    theme: Optional[str] = None
 
 
 # ===== OTHER EXISTING SCHEMAS (Activity, LessonPlan, etc.) =====
@@ -162,12 +267,42 @@ class ActivityGenerateResponse(BaseModel):
     learningOutcomes: List[str] = []
 
 
+class DetailedTopic(BaseModel):
+    name: str
+    periodsRequired: int
+    learningObjectives: List[str]
+    keyConcepts: List[str]
+
 class LessonPlanGenerateRequest(BaseModel):
-    topics: List[str]
+    topics: List[DetailedTopic]
     subject: str
     gradeLevel: str
     totalDuration: int
     classDuration: int = 45  # Duration per class period in minutes
+
+
+class ChunkBlock(BaseModel):
+    """One attention-span-sized chunk of the main teaching block.
+
+    Long, unbroken explanation is the #1 cause of lessons losing a class.
+    Instead of a single 'main_time' blob, the session's core instruction
+    is planned as a sequence of short chunks, each ending in a deliberate
+    check-in, matched to the grade band's realistic attention span.
+    """
+    order: int
+    focus: str                     # what this chunk teaches (a slice of the objective)
+    duration: int                   # minutes, sized to the grade's attention span
+    checkIn: str                    # the quick question/signal used to end this chunk
+
+
+class ReflectionPrompts(BaseModel):
+    """The 5-minute post-lesson reflection habit, generated per lesson so the
+    teacher doesn't have to remember to ask themselves these after class."""
+    mostConfusingPoint: str        # anticipated point of confusion to watch for
+    strongestExplanation: str      # which planned explanation/example is likely strongest
+    likelyDiscussionSpark: str     # which question is likely to spark the most discussion
+    objectiveCheckQuestion: str    # a question the teacher can ask themselves to verify the objective landed
+    suggestedRevision: str         # a placeholder prompt: "what would you change next time?"
 
 
 class LessonStep(BaseModel):
@@ -177,6 +312,8 @@ class LessonStep(BaseModel):
     method: str  # "I Do", "We Do", "You Do", "Discussion", etc.
     resources: List[str]
     notes: Optional[str] = None
+    checkInPrompt: Optional[str] = None
+    difficultyNote: Optional[str] = None
 
 
 class Concept(BaseModel):
@@ -209,6 +346,8 @@ class LessonSession(BaseModel):
     activities: List[LessonStep]
     checkForUnderstanding: List[CheckForUnderstanding]
     closure: str  # Summary and preview of next session
+    chunkPlan: List[ChunkBlock] = Field(default_factory=list)
+    backupPlan: Optional[str] = None
 
 
 class AssessmentPlan(BaseModel):
@@ -236,6 +375,7 @@ class LessonPlanGenerateResponse(BaseModel):
     differentiation: DifferentiationPlan
     totalSessions: int
     totalDuration: int  # Total minutes across all sessions
+    reflectionPrompts: Optional[ReflectionPrompts] = None
 
 
 class DoubtRequest(BaseModel):
